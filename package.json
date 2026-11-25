@@ -1,0 +1,31 @@
+{
+  "name": "dsh-stable-progressive-tools",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Session-stable progressive tool disclosure for DeepSeek Harness",
+  "type": "module",
+  "main": "lib/index.mjs",
+  "types": "lib/index.d.mts",
+  "sideEffects": false,
+  "exports": {
+    ".": { "types": "./lib/index.d.mts", "default": "./lib/index.mjs" },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": ["lib", "src", "cordis.patch.yml", "README.md"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && tsdown",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json",
+    "check": "npm run build && npm test"
+  },
+  "peerDependencies": { "@deepseek-ai/cordis": "^4.1.0" },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.1.0",
+    "@types/node": "^22.20.0",
+    "tsdown": "^0.22.2",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.8"
+  },
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
+}

@@ -1,0 +1,4 @@
+# Skeleton mount: configuration validation only; no tool-surface rewrite yet.
+- insert:
+    - id: stable-progressive-tools
+      name: dsh-stable-progressive-tools
