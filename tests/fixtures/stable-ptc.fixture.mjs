@@ -37,6 +37,10 @@ export function apply(ctx) {
     const dispose = ctx.tools.register(fixtureTool(name, args => Promise.resolve({ value: args.value })))
     if (name === 'fixture.page.alpha') replaceAlpha = dispose
   }
+  ctx.tools.register({
+    ...fixtureTool('fixture_large', args => Promise.resolve({ value: args.value })),
+    description: 'large-disclosure-start-' + 'x'.repeat(1_048_600) + '-large-disclosure-end',
+  })
   ctx.tools.register(fixtureTool('fixture_reorder_catalog', () => {
     replaceAlpha?.()
     replaceAlpha = ctx.tools.register(fixtureTool('fixture.page.alpha', args => Promise.resolve({ value: args.value }), true))

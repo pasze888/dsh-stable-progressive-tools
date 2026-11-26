@@ -14,6 +14,10 @@ export function runCode(id: string, code: string): ModelContent {
   return { type: 'tool_use', id, name: 'run_code', input: { code, description: 'Drive the hidden-tool workflow' } }
 }
 
+export function httpError(status: number, message: string): ModelContent {
+  return { type: 'http_error', status, message }
+}
+
 export function toolResultText(request: ModelRequest, callId: string): string {
   for (const message of request.messages as { content?: unknown }[]) {
     if (!Array.isArray(message.content)) continue
@@ -73,6 +77,11 @@ export async function createSdkFixture(
       const request = JSON.parse(body) as ModelRequest
       requests.push(request)
       const content = respond(request, requests)
+      if (content.type === 'http_error') {
+        response.writeHead(Number(content.status), { 'content-type': 'application/json' })
+        response.end(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: content.message } }))
+        return
+      }
       response.writeHead(200, { 'content-type': 'text/event-stream' })
       response.end(messagesResponse(content, content.type === 'tool_use' ? 'tool_use' : 'end_turn'))
     })

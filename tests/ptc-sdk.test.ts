@@ -2,6 +2,7 @@ import { fileURLToPath } from 'node:url'
 import { expect, it } from 'vitest'
 import {
   createSdkFixture,
+  httpError,
   localProductionPatch,
   runCode,
   stablePtcPatches,
@@ -15,11 +16,12 @@ function scripted(script: ModelContent[]) {
     script[requests.length - 1] ?? { type: 'text', text: 'unexpected extra request' }
 }
 
-it('discovers, describes, and executes a hidden tool through the official SDK', { timeout: 60_000 }, async () => {
+it('discovers, describes, and executes hidden tools through the official SDK', { timeout: 60_000 }, async () => {
   const script = [
     runCode('search-call', 'return await tools.search_tools({ query: "hidden fixture" })'),
-    runCode('describe-call', 'return await tools.describe_tools({ names: ["fixture_hidden"] })'),
+    runCode('describe-call', 'return await tools.describe_tools({ names: ["fixture_hidden", "fixture.page.alpha", "fixture.page.beta", "fixture.page.gamma", "fixture_eager", "fixture_mutate_catalog"] })'),
     runCode('hidden-call', 'return await tools.fixture_hidden({ value: "hidden-ok" })'),
+    runCode('punctuated-call', 'return await tools["fixture.page.alpha"]({ value: "punctuation-ok" })'),
     runCode('mutate-call', 'return await tools.fixture_mutate_catalog({ value: "remove-and-restrict" })'),
     runCode('verify-catalog-call', 'return await tools.search_tools({ query: "fixture" })'),
     { type: 'text', text: 'hidden workflow complete' },
@@ -31,7 +33,7 @@ it('discovers, describes, and executes a hidden tool through the official SDK', 
   const result = await harness.session('hidden-workflow').run('Run the hidden fixture workflow')
 
   expect(result.finalResponse).toBe('hidden workflow complete')
-  expect(requests).toHaveLength(6)
+  expect(requests).toHaveLength(7)
   expect(JSON.stringify(requests[0]?.tools)).toContain('run_code')
   const initialSystem = JSON.stringify(requests[0]?.system)
   expect(initialSystem).toContain('search_tools')
@@ -41,13 +43,79 @@ it('discovers, describes, and executes a hidden tool through the official SDK', 
   expect(JSON.stringify(requests[1]?.messages)).toContain('fixture_hidden')
   expect(JSON.stringify(requests[2]?.messages)).toContain('inputSchema')
   expect(JSON.stringify(requests[2]?.messages)).toContain('sdkExcerpt')
+  const disclosures = JSON.parse(toolResultText(requests[2]!, 'describe-call')) as {
+    tools: { name: string; description: string; inputSchema: object; outputSchema: object; sdkExcerpt: string; schemaHash: string }[]
+  }
+  expect(disclosures.tools.map(tool => tool.name)).toEqual([
+    'fixture_hidden',
+    'fixture.page.alpha',
+    'fixture.page.beta',
+    'fixture.page.gamma',
+    'fixture_eager',
+    'fixture_mutate_catalog',
+  ])
+  for (const tool of disclosures.tools) {
+    expect(tool.description).toContain(tool.name)
+    expect(tool.inputSchema).toMatchObject({
+      type: 'object',
+      required: ['value'],
+      properties: { value: { type: 'string' } },
+    })
+    expect(tool.outputSchema).toMatchObject({
+      type: 'object',
+      additionalProperties: false,
+      required: ['value'],
+      properties: { value: { type: 'string' } },
+    })
+    expect(tool.sdkExcerpt).toContain(tool.name)
+    expect(tool.schemaHash).toMatch(/^[a-f0-9]{64}$/)
+  }
   expect(JSON.stringify(requests[3]?.messages)).toContain('hidden-ok')
-  expect(JSON.stringify(requests[4]?.messages)).toContain('catalog-mutated')
-  expect(JSON.stringify(requests[5]?.messages)).toContain('fixture_hidden')
-  expect(JSON.stringify(requests[5]?.messages)).not.toContain('fixture_late')
-  expect(JSON.stringify(requests[5]?.messages)).not.toContain('fixture_restricted')
+  expect(JSON.stringify(requests[4]?.messages)).toContain('punctuation-ok')
+  expect(JSON.stringify(requests[5]?.messages)).toContain('catalog-mutated')
+  expect(JSON.stringify(requests[6]?.messages)).toContain('fixture_hidden')
+  expect(JSON.stringify(requests[6]?.messages)).not.toContain('fixture_late')
+  expect(JSON.stringify(requests[6]?.messages)).not.toContain('fixture_restricted')
   for (const request of requests.slice(1)) expect(JSON.stringify(request.system)).toBe(initialSystem)
   expect(result.events.some(event => event.type === 'tool/result' && event.data.error !== undefined)).toBe(false)
+})
+
+it('returns a Describe disclosure larger than the retired byte budget without truncation', { timeout: 60_000 }, async () => {
+  const fixture = await createSdkFixture('stable-ptc-large-describe', scripted([
+    runCode('large-describe-call', 'return await tools.describe_tools({ names: ["fixture_large"] })'),
+    { type: 'text', text: 'large Describe complete' },
+  ]))
+  const patches = await stablePtcPatches(fixture.root, { shellTool: 'none' })
+  patches.push(fileURLToPath(new URL('./fixtures/large-describe.yml', import.meta.url)))
+  const harness = fixture.harness(patches)
+
+  const result = await harness.session('large-describe').run('Return the complete large disclosure')
+
+  expect(result.finalResponse).toBe('large Describe complete')
+  expect(fixture.requests).toHaveLength(2)
+  const largeText = toolResultText(fixture.requests[1]!, 'large-describe-call')
+  const disclosure = JSON.parse(largeText) as {
+    tools: { name: string; description: string; inputSchema: object; outputSchema: object }[]
+  }
+  expect(disclosure.tools).toHaveLength(1)
+  expect(disclosure.tools[0]!.description.length).toBeGreaterThan(1_048_576)
+  expect(disclosure.tools[0]!.description).toContain('large-disclosure-start-')
+  expect(disclosure.tools[0]!.description.endsWith('-large-disclosure-end')).toBe(true)
+})
+
+it('propagates a Provider failure after Describe as an error', { timeout: 60_000 }, async () => {
+  const fixture = await createSdkFixture('stable-ptc-describe-provider-error', (_request, requests) =>
+    requests.length === 1
+      ? runCode('provider-error-describe', 'return await tools.describe_tools({ names: ["fixture_hidden"] })')
+      : httpError(400, 'provider-size-limit-sentinel'))
+  const harness = fixture.harness(await stablePtcPatches(fixture.root, { shellTool: 'none' }))
+
+  const result = await harness.session('describe-provider-error').run('Simulate a Provider hard failure')
+
+  expect(result.finishReason).toBe('error')
+  expect(result.finalResponse).not.toContain('complete')
+  expect(JSON.stringify(result.events)).toContain('provider-size-limit-sentinel')
+  expect(fixture.requests).toHaveLength(2)
 })
 
 it('preloads one available Shell declaration and executes its live PTC binding', { timeout: 60_000 }, async () => {

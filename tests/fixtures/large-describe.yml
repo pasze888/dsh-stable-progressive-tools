@@ -1,0 +1,4 @@
+# Keep the host's spill preview out of this plugin-boundary test.
+- id: spill-policy
+  config:
+    maxInlineTokens: 1000000
