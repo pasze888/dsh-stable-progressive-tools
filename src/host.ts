@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -8,6 +7,7 @@ import { defineTool, projectToolSchema, RUN_CODE_NAME, type ResolvedToolSet, typ
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { DESCRIBE_TOOLS_NAME, INVOKE_TOOL_NAME, SEARCH_TOOLS_NAME, type ResolvedConfig } from './config.ts'
 import { SurfaceManager } from './surface.ts'
+import { canonicalJsonHash } from './hash.ts'
 
 const INFRASTRUCTURE_NAMES = new Set([RUN_CODE_NAME, SEARCH_TOOLS_NAME, DESCRIBE_TOOLS_NAME, INVOKE_TOOL_NAME])
 
@@ -23,7 +23,33 @@ function sdkSchema(definition: ToolDefinition): ToolSdkSchema {
 }
 
 function schemaHash(schema: ToolSdkSchema): string {
-  return createHash('sha256').update(JSON.stringify({ parameters: schema.parameters, output: schema.output })).digest('hex')
+  return canonicalJsonHash({ parameters: schema.parameters, output: schema.output })
+}
+
+interface SearchCursor {
+  version: 1
+  query: string
+  namespace?: string
+  fingerprint: string
+  offset: number
+}
+
+function encodeCursor(cursor: SearchCursor): string {
+  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url')
+}
+
+function decodeCursor(value: string): SearchCursor {
+  try {
+    const cursor = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as Partial<SearchCursor>
+    if (cursor.version !== 1 || typeof cursor.query !== 'string' || typeof cursor.fingerprint !== 'string'
+      || (cursor.namespace !== undefined && typeof cursor.namespace !== 'string')
+      || !Number.isSafeInteger(cursor.offset) || (cursor.offset as number) < 0) {
+      throw new Error('invalid cursor payload')
+    }
+    return cursor as SearchCursor
+  } catch {
+    throw new Error('INVALID_SEARCH_CURSOR: restart Search without a cursor')
+  }
 }
 
 function liveCatalog(ctx: Context, agent: Agent | undefined, toolSet: ResolvedToolSet | undefined): ToolSdkSchema[] {
@@ -49,6 +75,7 @@ export function installStablePtc(ctx: Context, config: ResolvedConfig): void {
       query: { type: 'string', description: 'Optional case-insensitive name or description query.' },
       namespace: { type: 'string', description: 'Optional exact namespace prefix.' },
       limit: { type: 'integer', description: 'Optional maximum number of results.' },
+      cursor: { type: 'string', description: 'Opaque nextCursor from an earlier page of the same Search.' },
     },
     output: {
       schema: { type: 'json' },
@@ -63,22 +90,41 @@ export function installStablePtc(ctx: Context, config: ResolvedConfig): void {
       const requestedLimit = args.limit ?? config.maxSearchResults
       if (!Number.isSafeInteger(requestedLimit) || requestedLimit < 1) throw new Error('search_tools limit must be positive')
       const limit = Math.min(requestedLimit, config.maxSearchResults)
-      const all = liveCatalog(ctx, exec.agent, exec.toolSet).filter(tool =>
+      const catalog = liveCatalog(ctx, exec.agent, exec.toolSet)
+      const fingerprint = canonicalJsonHash(catalog)
+      let offset = 0
+      if (args.cursor !== undefined) {
+        const cursor = decodeCursor(args.cursor)
+        if (cursor.query !== query || cursor.namespace !== args.namespace) {
+          throw new Error('SEARCH_CURSOR_MISMATCH: restart Search with the intended query and namespace')
+        }
+        if (cursor.fingerprint !== fingerprint) {
+          throw new Error('TOOL_CATALOG_CHANGED: catalog changed; restart Search without a cursor')
+        }
+        offset = cursor.offset
+      }
+      const all = catalog.filter(tool =>
         (args.namespace === undefined || tool.name.startsWith(args.namespace + '.'))
         && (query.length === 0 || query === '*'
           || tool.name.toLocaleLowerCase('en-US').includes(query)
           || tool.description.toLocaleLowerCase('en-US').includes(query)))
       const matches = all.length > 0 || query.length === 0 || query === '*' || config.zeroMatch === 'empty'
         ? all
-        : liveCatalog(ctx, exec.agent, exec.toolSet)
+        : catalog
+      if (offset > matches.length) throw new Error('INVALID_SEARCH_CURSOR: cursor offset exceeds the result set')
+      const results = matches.slice(offset, offset + limit).map(tool => ({
+        name: tool.name,
+        summary: tool.description.slice(0, config.maxSummaryChars),
+        schemaHash: schemaHash(tool),
+      }))
+      const nextOffset = offset + results.length
       return Promise.resolve({
-        results: matches.slice(0, limit).map(tool => ({
-          name: tool.name,
-          summary: tool.description.slice(0, config.maxSummaryChars),
-          schemaHash: schemaHash(tool),
-        })),
+        results,
         total: matches.length,
         fallback: matches !== all,
+        ...nextOffset < matches.length ? {
+          nextCursor: encodeCursor({ version: 1, query, ...args.namespace === undefined ? {} : { namespace: args.namespace }, fingerprint, offset: nextOffset }),
+        } : {},
       })
     },
   })

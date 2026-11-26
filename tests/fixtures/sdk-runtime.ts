@@ -14,6 +14,21 @@ export function runCode(id: string, code: string): ModelContent {
   return { type: 'tool_use', id, name: 'run_code', input: { code, description: 'Drive the hidden-tool workflow' } }
 }
 
+export function toolResultText(request: ModelRequest, callId: string): string {
+  for (const message of request.messages as { content?: unknown }[]) {
+    if (!Array.isArray(message.content)) continue
+    for (const value of message.content) {
+      const block = value as Record<string, unknown>
+      if (block.type !== 'tool_result' || block.tool_use_id !== callId || !Array.isArray(block.content)) continue
+      for (const item of block.content) {
+        const content = item as Record<string, unknown>
+        if (content.type === 'text' && typeof content.text === 'string') return content.text
+      }
+    }
+  }
+  throw new Error('No text tool result found for ' + callId)
+}
+
 export async function localProductionPatch(root: string, config?: Record<string, unknown>): Promise<string> {
   const source = await readFile(fileURLToPath(new URL('../../cordis.patch.yml', import.meta.url)), 'utf8')
   const pluginUrl = pathToFileURL(fileURLToPath(new URL('../../lib/index.mjs', import.meta.url))).href

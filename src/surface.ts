@@ -1,9 +1,9 @@
-import { createHash } from 'node:crypto'
 import type { PtcProgramFormat } from '@deepseek-ai/dsh-ptc-runtime'
 import { renderToolsSdk, type ToolSdkSchema } from '@deepseek-ai/dsh-tool-executor-ptc'
 import { deepFreeze } from '@deepseek-ai/dsh-util-values'
 import { DESCRIBE_TOOLS_NAME, SEARCH_TOOLS_NAME, type ResolvedConfig } from './config.ts'
 import { resolveShell, type ShellResolution } from './shell.ts'
+import { canonicalJsonHash } from './hash.ts'
 
 export const DISCLOSURE_PROTOCOL_VERSION = 1
 export const STABLE_DISCLOSURE_PROMPT = [
@@ -40,19 +40,8 @@ export interface SessionSurface {
   programFormat: PtcProgramFormat
 }
 
-function canonicalize(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalize)
-  if (typeof value === 'object' && value !== null) {
-    const entries = Object.entries(value as Record<string, unknown>)
-      .filter((entry): entry is [string, unknown] => entry[1] !== undefined)
-      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
-    return Object.fromEntries(entries.map(([key, child]) => [key, canonicalize(child)]))
-  }
-  return value
-}
-
 function hashSurface(input: Omit<SessionSurface, 'surfaceHash' | 'cacheEpoch' | 'sessionId' | 'presetId'>): string {
-  return createHash('sha256').update(JSON.stringify(canonicalize(input))).digest('hex')
+  return canonicalJsonHash(input)
 }
 
 /** Owns immutable session surfaces; the live tool catalog is deliberately absent after creation. */

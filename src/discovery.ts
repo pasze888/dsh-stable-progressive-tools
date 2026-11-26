@@ -1,6 +1,6 @@
-export interface SearchToolsInput { query?: string; namespace?: string; limit?: number }
+export interface SearchToolsInput { query?: string; namespace?: string; limit?: number; cursor?: string }
 export interface SearchResultEntry { name: string; summary: string; namespace?: string; schemaHash: string }
-export interface SearchToolsResult { results: SearchResultEntry[]; total: number; fallback: boolean }
+export interface SearchToolsResult { results: SearchResultEntry[]; total: number; fallback: boolean; nextCursor?: string }
 
 export interface DescribeToolsInput { names: string[] }
 export interface ToolDescription {

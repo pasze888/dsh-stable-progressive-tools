@@ -5,6 +5,7 @@ import {
   localProductionPatch,
   runCode,
   stablePtcPatches,
+  toolResultText,
   type ModelContent,
   type ModelRequest,
 } from './fixtures/sdk-runtime.ts'
@@ -96,6 +97,67 @@ it('leaves subagent PTC presentation unchanged by session origin', { timeout: 60
   expect(childInitial).not.toContain('search_tools')
   expect(childInitial).not.toContain('describe_tools')
   expect(childInitial).not.toContain('Use search_tools to discover non-eager tools')
+})
+
+it('keeps Search cursors consistent across catalog changes', { timeout: 60_000 }, async () => {
+  let firstCursor = ''
+  let freshCursor = ''
+  const fixture = await createSdkFixture('stable-ptc-search-cursor', (request, requests) => {
+    if (requests.length === 1) {
+      return runCode('page-start', 'return await tools.search_tools({ query: "*", namespace: "fixture.page", limit: 2 })')
+    }
+    if (requests.length === 2) {
+      const page = JSON.parse(toolResultText(request, 'page-start')) as { nextCursor?: string }
+      firstCursor = page.nextCursor ?? ''
+      return runCode('reorder-catalog', 'return await tools.fixture_reorder_catalog({ value: "reorder" })')
+    }
+    if (requests.length === 3) {
+      return runCode('equivalent-page', 'return await tools.search_tools({ query: "*", namespace: "fixture.page", limit: 2, cursor: ' + JSON.stringify(firstCursor) + ' })')
+    }
+    if (requests.length === 4) {
+      return runCode('mutate-catalog', 'return await tools.fixture_hidden({ value: "cursor-mutation-ok" })')
+    }
+    if (requests.length === 5) {
+      return runCode('stale-page', 'return await tools.search_tools({ query: "*", namespace: "fixture.page", limit: 2, cursor: ' + JSON.stringify(firstCursor) + ' })')
+    }
+    if (requests.length === 6) {
+      return runCode('fresh-start', 'return await tools.search_tools({ query: "*", namespace: "fixture.page", limit: 2 })')
+    }
+    if (requests.length === 7) {
+      const page = JSON.parse(toolResultText(request, 'fresh-start')) as { nextCursor?: string }
+      freshCursor = page.nextCursor ?? ''
+      return runCode('fresh-page', 'return await tools.search_tools({ query: "*", namespace: "fixture.page", limit: 2, cursor: ' + JSON.stringify(freshCursor) + ' })')
+    }
+    return { type: 'text', text: 'cursor workflow complete' }
+  })
+  const harness = fixture.harness(await stablePtcPatches(fixture.root, { shellTool: 'none' }))
+
+  const result = await harness.session('search-cursors').run('Exercise consistent Search cursors')
+
+  expect(result.finalResponse).toBe('cursor workflow complete')
+  expect(fixture.requests).toHaveLength(8)
+  expect(firstCursor).not.toBe('')
+  expect(freshCursor).not.toBe('')
+  const firstPage = JSON.parse(toolResultText(fixture.requests[1]!, 'page-start')) as {
+    results: { name: string }[]
+    nextCursor?: string
+  }
+  expect(firstPage.results.map(item => item.name)).toEqual(['fixture.page.alpha', 'fixture.page.beta'])
+  expect(JSON.stringify(fixture.requests[2]?.messages)).toContain('catalog-reordered')
+  const equivalentPage = JSON.parse(toolResultText(fixture.requests[3]!, 'equivalent-page')) as { results: { name: string }[] }
+  expect(equivalentPage.results.map(item => item.name)).toEqual(['fixture.page.gamma'])
+  expect(JSON.stringify(fixture.requests[4]?.messages)).toContain('cursor-mutation-ok')
+  const stale = toolResultText(fixture.requests[5]!, 'stale-page')
+  expect(stale).toContain('TOOL_CATALOG_CHANGED')
+  expect(stale).not.toContain('fixture.page.gamma')
+  const secondPage = JSON.parse(toolResultText(fixture.requests[7]!, 'fresh-page')) as {
+    results: { name: string }[]
+    nextCursor?: string
+  }
+  expect(secondPage.results.map(item => item.name)).toEqual(['fixture.page.gamma'])
+  expect(secondPage.nextCursor).toBeUndefined()
+  const initialSystem = JSON.stringify(fixture.requests[0]?.system)
+  for (const request of fixture.requests.slice(1)) expect(JSON.stringify(request.system)).toBe(initialSystem)
 })
 
 it('keeps ordinary PTC byte-for-byte unchanged when the evaluation preset is installed', { timeout: 60_000 }, async () => {
