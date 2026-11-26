@@ -46,6 +46,15 @@ export async function localProductionPatch(root: string, config?: Record<string,
   return target
 }
 
+export function ordinaryPtcPatches(): string[] {
+  return [
+    fileURLToPath(new URL('./preset-runtime.yml', import.meta.url)),
+    fileURLToPath(import.meta.resolve('@deepseek-ai/dsh-web-app/presets/ptc.patch.yml')),
+    fileURLToPath(new URL('./ptc.yml', import.meta.url)),
+    fileURLToPath(new URL('./stable-ptc.yml', import.meta.url)),
+  ]
+}
+
 export async function stablePtcPatches(root: string, config?: Record<string, unknown>): Promise<string[]> {
   return [
     fileURLToPath(new URL('./preset-runtime.yml', import.meta.url)),
@@ -58,7 +67,7 @@ export async function stablePtcPatches(root: string, config?: Record<string, unk
 }
 
 interface HarnessOptions {
-  permissionMode?: 'danger-full-access' | 'workspace-write'
+  permissionMode?: 'danger-full-access' | 'workspace-write' | 'read-only'
   approvalRequests?: boolean
   dshHome?: string
 }

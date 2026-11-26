@@ -266,68 +266,88 @@ export async function installStablePtc(ctx: Context, config: ResolvedConfig): Pr
     }
   })
 
+  const ensureSurface = async (agent: Agent, signal?: AbortSignal) => {
+    const existing = surfaces.get(agent.session.id)
+    if (existing !== undefined) return existing
+    const history = surfaceHistory.stateOf(agent.session)
+    try {
+      const record = await readSurfaceRecord(agent.session)
+      let surface = record === undefined ? undefined : surfaces.restore({
+        sessionId: agent.session.id,
+        cacheEpoch: history.cacheEpoch,
+        surfaceHash: record.surfaceHash,
+        ...record.surface,
+      })
+      if (surface === undefined) {
+        if (history.hasPresentationHistory) {
+          throw new Error('Stable Surface restoration failed: recovery record is missing from existing history')
+        }
+        const modelSelection = agent.model.current()
+        if (modelSelection === undefined) throw new Error('Stable Surface creation requires a selected model')
+        const toolSet = await ctx.tools.resolve({
+          agent,
+          modelSelection,
+          signal: signal ?? new AbortController().signal,
+        })
+        try {
+          for (const expected of [searchTool, describeTool]) {
+            const current = ctx.tools.get(expected.name, agent, toolSet)
+            if (current !== expected) {
+              telemetry.record(agent.session, { type: 'surface-conflict', owner: 'discovery', reason: 'unavailable-or-shadowed', action: 'fail' })
+              throw new Error('stable-progressive-tools discovery tool is unavailable or shadowed: ' + expected.name)
+            }
+          }
+          const declarations = ctx.tools.definitions(agent, toolSet)
+            .filter(definition => definition.name !== RUN_CODE_NAME && definition.name !== INVOKE_TOOL_NAME)
+            .map(sdkSchema)
+          surface = surfaces.open({
+            sessionId: agent.session.id,
+            presetId: 'stable-ptc-eval',
+            origin: agent.session.header.origin === 'subagent' ? 'subagent' : 'user',
+            mode: 'code',
+            platform: process.platform,
+            availableTools: declarations.map(declaration => declaration.name),
+            declarations,
+            programFormat: ctx.get('ptcRuntime')?.programFormat ?? 'function-body',
+          })
+        } finally {
+          toolSet.dispose()
+        }
+      }
+      if (surface === undefined) return undefined
+      // Every new or inherited Surface is committed before its first model assembly.
+      await writeSurfaceRecord(agent.session, surface)
+      telemetry.record(agent.session, sessionOpenEvent(surface))
+      return surface
+    } catch (error) {
+      telemetry.record(agent.session, { type: 'error', operation: 'surface', reason: safeErrorReason('surface', error) })
+      surfaces.close(agent.session.id)
+      throw error
+    }
+  }
+
+  ctx.on('agent/created', async ({ agent, signal }) => {
+    if (isStableSurfaceEnabled(agent)) await ensureSurface(agent, signal)
+  })
+
   ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
     const assembly = await next()
     const agent = context.agent
     if (agent === undefined || !isStableSurfaceEnabled(agent)) return assembly
     const sdkIndex = assembly.sections.findIndex(section => section.name === 'tools:sdk')
     if (sdkIndex < 0) {
-      telemetry.record(agent.session, { type: 'surface-conflict', owner: 'tools:sdk', reason: 'missing-section', action: 'return-original' })
+      queueMicrotask(() => {
+        telemetry.record(agent.session, { type: 'surface-conflict', owner: 'tools:sdk', reason: 'missing-section', action: 'return-original' })
+      })
       return assembly
     }
+    const surface = surfaces.get(agent.session.id)
+    if (surface === undefined) throw new Error('Stable Surface is not initialized for this Agent')
     const history = surfaceHistory.stateOf(agent.session)
-    let surface = surfaces.get(agent.session.id)
-    const emitSessionOpen = surface === undefined
-    if (surface === undefined) try {
-      const record = await readSurfaceRecord(agent.session)
-      if (record !== undefined) {
-        surface = surfaces.restore({
-          sessionId: agent.session.id,
-          cacheEpoch: history.cacheEpoch,
-          surfaceHash: record.surfaceHash,
-          ...record.surface,
-        })
-        // Persist inherited Surfaces into each fork, so later descendants need only their direct parent.
-        await writeSurfaceRecord(agent.session, surface)
-      } else {
-        if (history.hasPresentationHistory) {
-          throw new Error('Stable Surface restoration failed: recovery record is missing from existing history')
-        }
-        for (const expected of [searchTool, describeTool]) {
-          const current = ctx.tools.get(expected.name, agent, context.toolSet)
-          if (current !== expected) {
-            telemetry.record(agent.session, { type: 'surface-conflict', owner: 'discovery', reason: 'unavailable-or-shadowed', action: 'fail' })
-            throw new Error('stable-progressive-tools discovery tool is unavailable or shadowed: ' + expected.name)
-          }
-        }
-        const declarations = ctx.tools.definitions(agent, context.toolSet)
-          .filter(definition => definition.name !== RUN_CODE_NAME && definition.name !== INVOKE_TOOL_NAME)
-          .map(sdkSchema)
-        surface = surfaces.open({
-          sessionId: agent.session.id,
-          presetId: 'stable-ptc-eval',
-          origin: agent.session.header.origin === 'subagent' ? 'subagent' : 'user',
-          mode: 'code',
-          platform: process.platform,
-          availableTools: declarations.map(declaration => declaration.name),
-          declarations,
-          programFormat: ctx.get('ptcRuntime')?.programFormat ?? 'function-body',
-        })
-        if (surface === undefined) return assembly
-        await writeSurfaceRecord(agent.session, surface)
-      }
-    } catch (error) {
-      telemetry.record(agent.session, { type: 'error', operation: 'surface', reason: safeErrorReason('surface', error) })
-      // SurfaceManager.open()/restore() publish to memory before the async file commit.
-      // Roll that publication back so a later assembly retries persistence instead of bypassing it.
-      surfaces.close(agent.session.id)
-      throw error
-    }
-    surface = surfaces.syncEpoch(agent.session.id, history.cacheEpoch) ?? surface
-    if (emitSessionOpen) telemetry.record(agent.session, sessionOpenEvent(surface))
+    const current = surfaces.syncEpoch(agent.session.id, history.cacheEpoch) ?? surface
     return {
       ...assembly,
-      sections: assembly.sections.map((section, index) => index === sdkIndex ? { ...section, text: surface.sdkText } : section),
+      sections: assembly.sections.map((section, index) => index === sdkIndex ? { ...section, text: current.sdkText } : section),
     }
   }, { prepend: true })
 }

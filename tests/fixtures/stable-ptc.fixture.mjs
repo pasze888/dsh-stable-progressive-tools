@@ -52,6 +52,7 @@ export function apply(ctx) {
   for (const name of ['constructor', 'toString', '__proto__']) {
     ctx.tools.register(fixtureTool(name, args => Promise.resolve({ value: args.value })))
   }
+  ctx.tools.register(fixtureTool('fixture_conditional', args => Promise.resolve({ value: args.value })), { when: () => false })
   const removeEager = ctx.tools.register(fixtureTool('fixture_eager', args => Promise.resolve({ value: args.value })))
   ctx.tools.register(fixtureTool('fixture_remove_eager', () => {
     removeEager()

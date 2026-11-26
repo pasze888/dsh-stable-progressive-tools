@@ -6,6 +6,7 @@ import {
   createSdkFixture,
   httpError,
   localProductionPatch,
+  ordinaryPtcPatches,
   runCode,
   stablePtcPatches,
   toolResultText,
@@ -165,6 +166,34 @@ it('preloads one available Shell declaration and executes its live PTC binding',
   expect(result.events.some(event => event.type === 'tool/result' && event.data.error !== undefined)).toBe(false)
 })
 
+it('preloads an explicit Shell once when it is also configured as Eager', { timeout: 60_000 }, async () => {
+  const fixture = await createSdkFixture('stable-ptc-explicit-shell', scripted([
+    runCode('explicit-shell-call', 'return await tools.bash({ command: "printf explicit-shell-ok", description: "Verify explicit Shell binding" })'),
+    { type: 'text', text: 'explicit Shell complete' },
+  ]))
+  const harness = fixture.harness(await stablePtcPatches(fixture.root, {
+    eagerTools: ['bash'],
+    shellTool: 'bash',
+  }))
+
+  const result = await harness.session('explicit-shell').run('Run an explicitly selected Shell')
+
+  expect(result.finalResponse).toBe('explicit Shell complete')
+  const initialSystem = JSON.stringify(fixture.requests[0]?.system)
+  // One declaration appears in each of ToolArgsMap and ToolOutputMap, with no Shell/Eager duplicate.
+  expect(initialSystem.split('bash:').length - 1).toBe(2)
+  expect(JSON.stringify(fixture.requests[1]?.messages)).toContain('explicit-shell-ok')
+})
+
+it.skipIf(process.platform === 'win32')('rejects an explicitly selected unavailable Shell before a model request', { timeout: 60_000 }, async () => {
+  const fixture = await createSdkFixture('stable-ptc-unavailable-shell', () => ({ type: 'text', text: 'unexpected model request' }))
+  const harness = fixture.harness(await stablePtcPatches(fixture.root, { shellTool: 'pwsh' }))
+
+  await expect(harness.session('unavailable-shell').run('This Shell must be unavailable'))
+    .rejects.toThrow('Configured shell tool is not available: pwsh')
+  expect(fixture.requests).toHaveLength(0)
+})
+
 it('leaves subagent PTC presentation unchanged by session origin', { timeout: 60_000 }, async () => {
   const fixture = await createSdkFixture('stable-ptc-subagent', (request, requests) => {
     const messages = JSON.stringify(request.messages)
@@ -173,7 +202,7 @@ it('leaves subagent PTC presentation unchanged by session origin', { timeout: 60
     const hasWaitResult = messages.includes('child complete') && messages.includes('wait_agent')
     if (isChild) return { type: 'text', text: 'child complete' }
     if (hasWaitResult) return { type: 'text', text: 'parent complete' }
-    return requests.length === 1
+    return Array.isArray(request.messages) && request.messages.length === 1
       ? runCode('subagent-call', 'return await tools.subagent({ description: "Inspect child SDK", prompt: "Return only the child response." })')
       : runCode('wait-call', 'return await tools.wait_agent({ timeout_ms: 10000 })')
   })
@@ -182,16 +211,22 @@ it('leaves subagent PTC presentation unchanged by session origin', { timeout: 60
   const result = await harness.session('parent-surface').run('Delegate one response')
 
   expect(result.finalResponse).toBe('parent complete')
-  expect(fixture.requests).toHaveLength(4)
+  const baselineHarness = fixture.harness(ordinaryPtcPatches())
+  const baselineResult = await baselineHarness.session('baseline-parent').run('Delegate one response')
+  expect(baselineResult.finalResponse).toBe('parent complete')
+  expect(fixture.requests).toHaveLength(8)
   const parentInitial = JSON.stringify(fixture.requests[0]?.system)
-  const childRequest = fixture.requests.find(request => JSON.stringify((request.messages as unknown[])[0]).includes('Return only the child response.'))!
-  const childInitial = JSON.stringify(childRequest.system)
+  const children = fixture.requests.filter(request => JSON.stringify((request.messages as unknown[])[0]).includes('Return only the child response.'))
+  expect(children).toHaveLength(2)
+  const childInitial = JSON.stringify(children[0]!.system)
   expect(parentInitial).not.toContain('fixture_hidden')
   expect(parentInitial).toContain('search_tools')
   expect(childInitial).toContain('fixture_hidden')
   expect(childInitial).not.toContain('search_tools')
   expect(childInitial).not.toContain('describe_tools')
   expect(childInitial).not.toContain('Use search_tools to discover non-eager tools')
+  expect(childInitial).toBe(JSON.stringify(children[1]!.system))
+  expect(JSON.stringify(children[0]!.tools)).toBe(JSON.stringify(children[1]!.tools))
 })
 
 it('keeps Search cursors consistent across catalog changes', { timeout: 60_000 }, async () => {
@@ -378,17 +413,17 @@ it('rolls back an unpublished Surface when persistence fails and retries honestl
   const blocker = join(home, 'stable-progressive-tools')
   await writeFile(blocker, 'block the Surface directory')
   const harness = fixture.harness(await stablePtcPatches(fixture.root, { shellTool: 'none' }), { dshHome: home })
-  const session = harness.session('surface-write-retry')
-  const failed = await session.run('Fail the first Surface write')
-  expect(failed.finishReason).toBe('error')
-  expect(JSON.stringify(failed.events)).toContain('cannot commit recovery record')
+  const sessionId = 'surface-write-retry'
+  const session = harness.session(sessionId)
+  await expect(session.run('Fail the first Surface write')).rejects.toThrow('cannot commit recovery record')
   expect(fixture.requests).toHaveLength(0)
 
   await rm(blocker)
-  const retried = await session.run('Retry the Surface write')
+  const resumed = await harness.resumeSession(sessionId)
+  const retried = await resumed.run('Retry the Surface write')
   expect(retried.finalResponse).toBe('Surface retry complete')
   expect(fixture.requests).toHaveLength(1)
-  const record = join(home, 'stable-progressive-tools', 'surfaces', Buffer.from(failed.sessionId).toString('base64url') + '.json')
+  const record = join(home, 'stable-progressive-tools', 'surfaces', Buffer.from(sessionId).toString('base64url') + '.json')
   expect(JSON.parse(await readFile(record, 'utf8')).version).toBe(1)
 })
 
@@ -403,11 +438,7 @@ it('fails honestly when a persisted Surface record is corrupt', { timeout: 60_00
   await writeFile(record, '{not-json')
 
   const second = fixture.harness(await stablePtcPatches(fixture.root, { shellTool: 'none' }), { dshHome: home })
-  const resumed = await second.resumeSession('corrupt-surface')
-  const result = await resumed.run('The corrupt Surface must not be replaced')
-
-  expect(result.finishReason).toBe('error')
-  expect(JSON.stringify(result.events)).toContain('invalid recovery record')
+  await expect(second.resumeSession('corrupt-surface')).rejects.toThrow('invalid recovery record')
   expect(fixture.requests).toHaveLength(1)
 })
 
@@ -531,6 +562,36 @@ it('keeps ordinary PTC byte-for-byte unchanged when the evaluation preset is ins
   expect(JSON.stringify(installed?.tools)).toBe(JSON.stringify(baseline?.tools))
 })
 
+it('restores ordinary PTC for new sessions after rollback without mutating an active Surface', { timeout: 60_000 }, async () => {
+  const fixture = await createSdkFixture('stable-ptc-rollback', () => ({ type: 'text', text: 'rollback complete' }))
+  const baselineHarness = fixture.harness(ordinaryPtcPatches())
+  const baseline = await baselineHarness.session('rollback-baseline').run('Capture the ordinary baseline')
+  expect(baseline.finalResponse).toBe('rollback complete')
+  await baselineHarness.close()
+
+  const activeHarness = fixture.harness(await stablePtcPatches(fixture.root, {
+    eagerTools: ['fixture_eager'],
+    shellTool: 'none',
+  }))
+  const active = activeHarness.session('active-surface')
+  const before = await active.run('Open the active Stable Surface')
+  expect(before.finalResponse).toBe('rollback complete')
+
+  const rollbackHarness = fixture.harness(ordinaryPtcPatches())
+  const rolledBack = await rollbackHarness.session('rollback-new').run('Start a new Session after rollback')
+  expect(rolledBack.finalResponse).toBe('rollback complete')
+  const after = await active.run('Continue the active Stable Surface')
+  expect(after.finalResponse).toBe('rollback complete')
+
+  expect(fixture.requests).toHaveLength(4)
+  expect(JSON.stringify(fixture.requests[2]?.system)).toBe(JSON.stringify(fixture.requests[0]?.system))
+  expect(JSON.stringify(fixture.requests[2]?.tools)).toBe(JSON.stringify(fixture.requests[0]?.tools))
+  expect(JSON.stringify(fixture.requests[3]?.system)).toBe(JSON.stringify(fixture.requests[1]?.system))
+  expect(JSON.stringify(fixture.requests[2]?.system)).toContain('fixture_hidden')
+  expect(JSON.stringify(fixture.requests[2]?.system)).not.toContain('Use search_tools to discover non-eager tools')
+  expect(JSON.stringify(fixture.requests[1]?.system)).not.toContain('fixture_hidden')
+})
+
 it('enforces Search query and zero-match budgets through run_code', { timeout: 60_000 }, async () => {
   const fixture = await createSdkFixture('stable-ptc-search-budgets', scripted([
     runCode('empty-search-call', 'return await tools.search_tools({ query: "zzz" })'),
@@ -558,6 +619,18 @@ it('enforces Search query and zero-match budgets through run_code', { timeout: 6
   expect(JSON.stringify(telemetry)).not.toContain('123456789')
 })
 
+it('rejects a conditionally unavailable Eager Tool at Agent creation', { timeout: 60_000 }, async () => {
+  const fixture = await createSdkFixture('stable-ptc-conditional-eager', () => ({ type: 'text', text: 'unexpected model request' }))
+  const harness = fixture.harness(await stablePtcPatches(fixture.root, {
+    eagerTools: ['fixture_conditional'],
+    shellTool: 'none',
+  }))
+
+  await expect(harness.session('conditional-eager').run('This conditional Eager Tool must be unavailable'))
+    .rejects.toThrow('Configured eager tool is not available: fixture_conditional')
+  expect(fixture.requests).toHaveLength(0)
+})
+
 it('rejects an unavailable Eager Tool before emitting a mutated model request', { timeout: 60_000 }, async () => {
   const fixture = await createSdkFixture('stable-ptc-invalid-eager', () => ({ type: 'text', text: 'unexpected model request' }))
   const harness = fixture.harness(await stablePtcPatches(fixture.root, {
@@ -565,10 +638,8 @@ it('rejects an unavailable Eager Tool before emitting a mutated model request', 
     shellTool: 'none',
   }))
 
-  const result = await harness.session('invalid-eager').run('This configuration must fail')
-
-  expect(result.finishReason).toBe('error')
-  expect(JSON.stringify(result.events)).toContain('Configured eager tool is not available: fixture_missing')
+  await expect(harness.session('invalid-eager').run('This configuration must fail'))
+    .rejects.toThrow('Configured eager tool is not available: fixture_missing')
   expect((await fixture.telemetry()).find(event => event.type === 'error')).toMatchObject({
     operation: 'surface',
     reason: 'eager-tool-unavailable',
@@ -600,4 +671,67 @@ it('keeps the live approval pipeline for a hidden Shell invocation', { timeout: 
   expect(approvals[0]).toMatchObject({ sessionId: 'hidden-approval', toolName: 'bash' })
   expect(JSON.stringify(fixture.requests[0]?.system)).not.toContain('bash:')
   expect(JSON.stringify(fixture.requests[1]?.messages)).toContain('rejected')
+})
+
+it('accepts a hidden Shell approval through the existing callback', { timeout: 60_000 }, async () => {
+  const fixture = await createSdkFixture('stable-ptc-approval-accept', scripted([
+    runCode('approval-accept-call', 'return await tools.bash({ command: "printf acceptance-ok > /tmp/stable-ptc-approval-acceptance-probe", description: "Verify hidden-tool approval acceptance", workdir: "/", sandbox_permissions: "danger-full-access", justification: "Exercise approval acceptance with a disposable probe." })'),
+    { type: 'text', text: 'approval acceptance complete' },
+  ]))
+  const harness = fixture.harness(await stablePtcPatches(fixture.root, { shellTool: 'none' }), {
+    permissionMode: 'workspace-write',
+    approvalRequests: true,
+  })
+  const approvals: Record<string, unknown>[] = []
+  harness.client.start()
+  harness.client.onRequest(async () => {
+    approvals.push({})
+    return { outcome: 'allowed-once' }
+  })
+  const probe = '/tmp/stable-ptc-approval-acceptance-probe'
+  await rm(probe, { force: true })
+
+  const result = await harness.session('accepted-approval').run('Allow the hidden Shell probe')
+
+  expect(result.finalResponse).toBe('approval acceptance complete')
+  expect(approvals).toHaveLength(1)
+  expect(JSON.stringify(fixture.requests[1]?.messages)).toContain('acceptance-ok')
+  expect(await readFile(probe, 'utf8')).toBe('acceptance-ok')
+  await rm(probe, { force: true })
+})
+
+it('fails closed when the approval handler is missing', { timeout: 60_000 }, async () => {
+  const fixture = await createSdkFixture('stable-ptc-approval-missing', scripted([
+    runCode('approval-missing-call', 'return await tools.bash({ command: "printf missing-handler > /tmp/stable-ptc-missing-handler-probe", description: "Verify missing approval handler", workdir: "/", sandbox_permissions: "danger-full-access", justification: "Exercise fail-closed behavior without a handler." })'),
+    { type: 'text', text: 'missing approval complete' },
+  ]))
+  const harness = fixture.harness(await stablePtcPatches(fixture.root, { shellTool: 'none' }), {
+    permissionMode: 'workspace-write',
+    approvalRequests: true,
+  })
+  harness.client.start()
+  const probe = '/tmp/stable-ptc-missing-handler-probe'
+  await rm(probe, { force: true })
+
+  const result = await harness.session('missing-approval').run('Run without an approval handler')
+
+  expect(result.finalResponse).toBe('missing approval complete')
+  expect(JSON.stringify(fixture.requests[1]?.messages)).toContain('unavailable')
+  await expect(readFile(probe, 'utf8')).rejects.toThrow()
+})
+
+it('preserves Policy denial without reaching the hidden Shell body', { timeout: 60_000 }, async () => {
+  const fixture = await createSdkFixture('stable-ptc-policy-denial', scripted([
+    runCode('policy-denial-call', 'return await tools.bash({ command: "printf policy-denied > policy-probe.txt", description: "Verify Policy denial" })'),
+    { type: 'text', text: 'Policy denial complete' },
+  ]))
+  const harness = fixture.harness(await stablePtcPatches(fixture.root, { shellTool: 'none' }), {
+    permissionMode: 'read-only',
+  })
+
+  const result = await harness.session('policy-denial').run('Attempt a write in read-only mode')
+
+  expect(result.finalResponse).toBe('Policy denial complete')
+  expect(JSON.stringify(fixture.requests[1]?.messages)).toContain('read-only')
+  await expect(readFile(join(fixture.root, 'policy-probe.txt'), 'utf8')).rejects.toThrow()
 })
