@@ -2,12 +2,15 @@ import { describe, expect, it } from 'vitest'
 import { resolveConfig } from '../src/config.ts'
 
 describe('resolveConfig', () => {
-  it('uses stable opt-in defaults', () => {
-    expect(resolveConfig()).toMatchObject({
-      activation: { enabledPresets: ['stable-ptc-eval'], includeSubagents: false },
+  it('uses preset-scoped PTC defaults without retired budgets or modes', () => {
+    expect(resolveConfig()).toEqual({
+      activation: { includeSubagents: false },
+      eagerTools: [],
       shellTool: 'auto',
+      maxSearchResults: 10,
+      maxSummaryChars: 240,
+      maxQueryChars: 500,
       zeroMatch: 'catalog',
-      cache: { scope: 'session', onConflict: 'fallback' },
     })
   })
 
@@ -16,8 +19,9 @@ describe('resolveConfig', () => {
     expect(() => resolveConfig({ eagerTools: ['run_code'] })).toThrow(/infrastructure/)
   })
 
-  it('rejects invalid numeric budgets', () => {
-    expect(() => resolveConfig({ maxDescribeTools: 0 })).toThrow(/positive safe integer/)
-    expect(() => resolveConfig({ telemetry: { sampleSuccessRate: 1.1 } })).toThrow(/between 0 and 1/)
+  it('rejects invalid Search budgets', () => {
+    expect(() => resolveConfig({ maxSearchResults: 0 })).toThrow(/positive safe integer/)
+    expect(() => resolveConfig({ maxSummaryChars: 0 })).toThrow(/positive safe integer/)
+    expect(() => resolveConfig({ maxQueryChars: 0 })).toThrow(/positive safe integer/)
   })
 })

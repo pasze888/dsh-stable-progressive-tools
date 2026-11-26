@@ -1,17 +1,17 @@
 /**
- * Skeleton entry: validates configuration but deliberately performs no
- * model-surface rewrite until the presentation adapters are implemented.
+ * Preset-scoped stable progressive disclosure for TypeScript PTC sessions.
  * @module dsh-stable-progressive-tools
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { resolveConfig, type Config } from './config.ts'
 import { SurfaceManager } from './surface.ts'
+import { installStablePtc } from './host.ts'
 
 export const name = 'stable-progressive-tools'
-export const inject: string[] = []
+export const inject = ['tools', 'systemPrompt', 'ptcRuntime']
 
-export function apply(_ctx: Context, config: Config): void {
-  resolveConfig(config)
+export function apply(ctx: Context, config: Config = {}): void {
+  installStablePtc(ctx, resolveConfig(config))
 }
 
 export function createSurfaceManager(config: Config = {}): SurfaceManager {

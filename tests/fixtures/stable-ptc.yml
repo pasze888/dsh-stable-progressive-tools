@@ -1,0 +1,3 @@
+- insert:
+    - id: stable-ptc-test-fixture
+      name: './stable-ptc.fixture.mjs'

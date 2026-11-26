@@ -8,24 +8,56 @@
   "types": "lib/index.d.mts",
   "sideEffects": false,
   "exports": {
-    ".": { "types": "./lib/index.d.mts", "default": "./lib/index.mjs" },
+    ".": {
+      "types": "./lib/index.d.mts",
+      "default": "./lib/index.mjs"
+    },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
-  "files": ["lib", "src", "cordis.patch.yml", "README.md"],
+  "files": [
+    "lib",
+    "src",
+    "cordis.patch.yml",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json && tsdown",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json",
     "check": "npm run build && npm test"
   },
-  "peerDependencies": { "@deepseek-ai/cordis": "^4.1.0" },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.1.0",
+    "@deepseek-ai/dsh-agent": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-ptc-runtime": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-system-prompt": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-tool-executor-ptc": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.2",
+    "@deepseek-ai/dsh-util-values": "0.2.2-rc.2"
+  },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.1.0",
+    "@deepseek-ai/dsh": "^0.2.2-rc.2",
+    "@deepseek-ai/dsh-agent": "^0.2.2-rc.2",
+    "@deepseek-ai/dsh-agent-preset": "^0.2.2-rc.2",
+    "@deepseek-ai/dsh-agent-preset-registry": "^0.2.2-rc.2",
+    "@deepseek-ai/dsh-llm": "^0.2.2-rc.2",
+    "@deepseek-ai/dsh-ptc-runtime": "^0.2.2-rc.2",
+    "@deepseek-ai/dsh-scope": "^0.2.2-rc.2",
+    "@deepseek-ai/dsh-sdk-client": "^0.2.2-rc.2",
+    "@deepseek-ai/dsh-system-prompt": "^0.2.2-rc.2",
+    "@deepseek-ai/dsh-tool-executor-ptc": "^0.2.2-rc.2",
+    "@deepseek-ai/dsh-tools": "^0.2.2-rc.2",
+    "@deepseek-ai/dsh-util-values": "^0.2.2-rc.2",
     "@types/node": "^22.20.0",
     "tsdown": "^0.22.2",
     "typescript": "^5.9.3",
     "vitest": "^4.1.8"
   },
-  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
 }
