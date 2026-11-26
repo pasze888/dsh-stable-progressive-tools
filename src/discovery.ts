@@ -13,6 +13,19 @@ export interface ToolDescription {
 }
 export interface DescribeToolsResult { tools: ToolDescription[] }
 
+export interface CatalogEntry { name: string; description: string }
+
+/** Shared deterministic lexical ranker used by live Search and offline evaluation. */
+export function rankCatalog<T extends CatalogEntry>(catalog: readonly T[], input: { query?: string; namespace?: string }): T[] {
+  const query = input.query?.trim().toLocaleLowerCase('en-US') ?? ''
+  return catalog.filter(tool =>
+    (input.namespace === undefined || tool.name.startsWith(input.namespace + '.'))
+    && (query.length === 0 || query === '*'
+      || tool.name.toLocaleLowerCase('en-US').includes(query)
+      || tool.description.toLocaleLowerCase('en-US').includes(query)))
+    .sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)
+}
+
 /** Discovery reads the live registry; it never mutates authorization or the session surface. */
 export interface DiscoveryModule {
   search(input: SearchToolsInput): Promise<SearchToolsResult>

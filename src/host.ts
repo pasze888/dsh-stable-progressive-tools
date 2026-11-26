@@ -6,12 +6,14 @@ import { renderToolsSdk, type ToolSdkSchema } from '@deepseek-ai/dsh-tool-execut
 import { defineTool, projectToolSchema, RUN_CODE_NAME, type ResolvedToolSet, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { DESCRIBE_TOOLS_NAME, INVOKE_TOOL_NAME, SEARCH_TOOLS_NAME, type ResolvedConfig } from './config.ts'
+import { rankCatalog } from './discovery.ts'
 import { SurfaceManager } from './surface.ts'
 import { canonicalJsonHash } from './hash.ts'
 import { registerDisclosureHistory } from './disclosure-history.ts'
 import { ToolSchemaChangedError } from './invocation.ts'
 import { registerSurfaceHistory } from './surface-history.ts'
 import { readSurfaceRecord, writeSurfaceRecord } from './surface-store.ts'
+import { SessionTelemetry, sessionOpenEvent, telemetryBytes } from './telemetry.ts'
 
 const INFRASTRUCTURE_NAMES = new Set([RUN_CODE_NAME, SEARCH_TOOLS_NAME, DESCRIBE_TOOLS_NAME, INVOKE_TOOL_NAME])
 
@@ -71,9 +73,32 @@ function renderSdk(ctx: Context, schemas: readonly ToolSdkSchema[]): string {
   return renderToolsSdk(schemas, runtime.programFormat)
 }
 
+function safeErrorReason(operation: 'search' | 'describe' | 'surface', error: unknown): string {
+  const message = error instanceof Error ? error.message : ''
+  if (operation === 'search') {
+    if (message.includes('maxQueryChars')) return 'query-too-long'
+    if (message.includes('limit must be positive')) return 'invalid-limit'
+    if (message.includes('SEARCH_CURSOR_MISMATCH')) return 'cursor-mismatch'
+    if (message.includes('TOOL_CATALOG_CHANGED')) return 'catalog-changed'
+    if (message.includes('INVALID_SEARCH_CURSOR')) return 'invalid-cursor'
+    return 'search-failed'
+  }
+  if (operation === 'describe') {
+    if (message.includes('names must not be empty')) return 'empty-names'
+    if (message.includes('unknown or unavailable tool')) return 'unknown-or-unavailable-tool'
+    return 'describe-failed'
+  }
+  if (message.includes('Configured eager tool')) return 'eager-tool-unavailable'
+  if (message.includes('Configured shell tool')) return 'shell-unavailable'
+  if (message.includes('restoration failed')) return 'restoration-failed'
+  if (message.includes('persistence failed')) return 'persistence-failed'
+  return 'surface-failed'
+}
+
 export async function installStablePtc(ctx: Context, config: ResolvedConfig): Promise<void> {
   const disclosureHistory = await registerDisclosureHistory(ctx)
   const surfaceHistory = await registerSurfaceHistory(ctx)
+  const telemetry = new SessionTelemetry(config.telemetry.sampleSuccessRate)
   const searchTool = defineTool({
     name: SEARCH_TOOLS_NAME,
     description: 'Search the live tool catalog by exact names and description words without changing tool permissions.',
@@ -89,6 +114,8 @@ export async function installStablePtc(ctx: Context, config: ResolvedConfig): Pr
     },
     isConcurrencySafe: () => true,
     execute(args, exec) {
+      const started = performance.now()
+      try {
       if (args.query !== undefined && args.query.length > config.maxQueryChars) {
         throw new Error(`search_tools query exceeds maxQueryChars (${config.maxQueryChars})`)
       }
@@ -109,11 +136,7 @@ export async function installStablePtc(ctx: Context, config: ResolvedConfig): Pr
         }
         offset = cursor.offset
       }
-      const all = catalog.filter(tool =>
-        (args.namespace === undefined || tool.name.startsWith(args.namespace + '.'))
-        && (query.length === 0 || query === '*'
-          || tool.name.toLocaleLowerCase('en-US').includes(query)
-          || tool.description.toLocaleLowerCase('en-US').includes(query)))
+      const all = rankCatalog(catalog, { query, ...args.namespace === undefined ? {} : { namespace: args.namespace } })
       const matches = all.length > 0 || query.length === 0 || query === '*' || config.zeroMatch === 'empty'
         ? all
         : catalog
@@ -124,14 +147,41 @@ export async function installStablePtc(ctx: Context, config: ResolvedConfig): Pr
         schemaHash: schemaHash(tool),
       }))
       const nextOffset = offset + results.length
-      return Promise.resolve({
+      const result = {
         results,
         total: matches.length,
         fallback: matches !== all,
         ...nextOffset < matches.length ? {
           nextCursor: encodeCursor({ version: 1, query, ...args.namespace === undefined ? {} : { namespace: args.namespace }, fingerprint, offset: nextOffset }),
         } : {},
-      })
+      }
+      if (exec.agent !== undefined) {
+        const durationMs = performance.now() - started
+        const resultBytes = telemetryBytes(result)
+        telemetry.record(exec.agent.session, {
+          type: 'search',
+          resultCount: result.results.length,
+          totalCount: result.total,
+          durationMs,
+          resultBytes,
+          schemaHashes: result.results.map(item => item.schemaHash),
+          fallback: result.fallback,
+        })
+        if (result.fallback) {
+          telemetry.record(exec.agent.session, {
+            type: 'fallback', operation: 'search', reason: 'zero-match-catalog', durationMs, resultCount: result.results.length, resultBytes,
+          })
+        }
+      }
+      return Promise.resolve(result)
+      } catch (error) {
+        if (exec.agent !== undefined) {
+          telemetry.record(exec.agent.session, {
+            type: 'error', operation: 'search', reason: safeErrorReason('search', error), durationMs: performance.now() - started,
+          })
+        }
+        throw error
+      }
     },
   })
 
@@ -151,6 +201,8 @@ export async function installStablePtc(ctx: Context, config: ResolvedConfig): Pr
     },
     isConcurrencySafe: () => true,
     execute(args, exec) {
+      const started = performance.now()
+      try {
       if (args.names.length === 0) throw new Error('describe_tools names must not be empty')
       const byName = new Map(liveCatalog(ctx, exec.agent, exec.toolSet).map(tool => [tool.name, tool]))
       const selected = [...new Set(args.names)].map(name => {
@@ -158,7 +210,7 @@ export async function installStablePtc(ctx: Context, config: ResolvedConfig): Pr
         if (tool === undefined) throw new Error('describe_tools received unknown or unavailable tool: ' + JSON.stringify(name))
         return tool
       })
-      return Promise.resolve({
+      const result = {
         tools: selected.map(tool => ({
           name: tool.name,
           description: tool.description,
@@ -167,7 +219,26 @@ export async function installStablePtc(ctx: Context, config: ResolvedConfig): Pr
           sdkExcerpt: renderSdk(ctx, [tool]),
           schemaHash: schemaHash(tool),
         })),
-      })
+      }
+      if (exec.agent !== undefined) {
+        telemetry.record(exec.agent.session, {
+          type: 'describe',
+          requestedCount: args.names.length,
+          resultCount: result.tools.length,
+          durationMs: performance.now() - started,
+          resultBytes: telemetryBytes(result),
+          schemaHashes: result.tools.map(tool => tool.schemaHash),
+        })
+      }
+      return Promise.resolve(result)
+      } catch (error) {
+        if (exec.agent !== undefined) {
+          telemetry.record(exec.agent.session, {
+            type: 'error', operation: 'describe', reason: safeErrorReason('describe', error), durationMs: performance.now() - started,
+          })
+        }
+        throw error
+      }
     },
   })
 
@@ -186,6 +257,9 @@ export async function installStablePtc(ctx: Context, config: ResolvedConfig): Pr
     const live = ctx.tools.get(exec.name, exec.agent, exec.toolSet)
     if (live === undefined || schemaHash(sdkSchema(live)) === expected) return
     const error = new ToolSchemaChangedError(exec.name)
+    telemetry.record(exec.agent.session, {
+      type: 'schema-change', toolName: exec.name, oldSchemaHash: expected, newSchemaHash: schemaHash(sdkSchema(live)),
+    })
     return {
       reason: 'TOOL_SCHEMA_CHANGED: ' + error.message,
       info: { name: error.name, code: 'TOOL_SCHEMA_CHANGED' },
@@ -197,9 +271,13 @@ export async function installStablePtc(ctx: Context, config: ResolvedConfig): Pr
     const agent = context.agent
     if (agent === undefined || !isStableSurfaceEnabled(agent)) return assembly
     const sdkIndex = assembly.sections.findIndex(section => section.name === 'tools:sdk')
-    if (sdkIndex < 0) return assembly
+    if (sdkIndex < 0) {
+      telemetry.record(agent.session, { type: 'surface-conflict', owner: 'tools:sdk', reason: 'missing-section', action: 'return-original' })
+      return assembly
+    }
     const history = surfaceHistory.stateOf(agent.session)
     let surface = surfaces.get(agent.session.id)
+    const emitSessionOpen = surface === undefined
     if (surface === undefined) try {
       const record = await readSurfaceRecord(agent.session)
       if (record !== undefined) {
@@ -217,7 +295,10 @@ export async function installStablePtc(ctx: Context, config: ResolvedConfig): Pr
         }
         for (const expected of [searchTool, describeTool]) {
           const current = ctx.tools.get(expected.name, agent, context.toolSet)
-          if (current !== expected) throw new Error('stable-progressive-tools discovery tool is unavailable or shadowed: ' + expected.name)
+          if (current !== expected) {
+            telemetry.record(agent.session, { type: 'surface-conflict', owner: 'discovery', reason: 'unavailable-or-shadowed', action: 'fail' })
+            throw new Error('stable-progressive-tools discovery tool is unavailable or shadowed: ' + expected.name)
+          }
         }
         const declarations = ctx.tools.definitions(agent, context.toolSet)
           .filter(definition => definition.name !== RUN_CODE_NAME && definition.name !== INVOKE_TOOL_NAME)
@@ -236,12 +317,14 @@ export async function installStablePtc(ctx: Context, config: ResolvedConfig): Pr
         await writeSurfaceRecord(agent.session, surface)
       }
     } catch (error) {
+      telemetry.record(agent.session, { type: 'error', operation: 'surface', reason: safeErrorReason('surface', error) })
       // SurfaceManager.open()/restore() publish to memory before the async file commit.
       // Roll that publication back so a later assembly retries persistence instead of bypassing it.
       surfaces.close(agent.session.id)
       throw error
     }
     surface = surfaces.syncEpoch(agent.session.id, history.cacheEpoch) ?? surface
+    if (emitSessionOpen) telemetry.record(agent.session, sessionOpenEvent(surface))
     return {
       ...assembly,
       sections: assembly.sections.map((section, index) => index === sdkIndex ? { ...section, text: surface.sdkText } : section),

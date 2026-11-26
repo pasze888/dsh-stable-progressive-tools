@@ -1,5 +1,5 @@
 import { createServer } from 'node:http'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -17,6 +17,7 @@ export function runCode(id: string, code: string): ModelContent {
 export function httpError(status: number, message: string): ModelContent {
   return { type: 'http_error', status, message }
 }
+
 
 export function toolResultText(request: ModelRequest, callId: string): string {
   for (const message of request.messages as { content?: unknown }[]) {
@@ -99,14 +100,31 @@ export async function createSdkFixture(
   const address = server.address()
   if (address === null || typeof address === 'string') throw new Error('model fixture has no port')
   const port = address.port
+  let latestHome = join(root, '.dsh-0')
   return {
     root,
     requests,
+    async telemetry(): Promise<Record<string, unknown>[]> {
+      const directory = join(latestHome, 'stable-progressive-tools', 'telemetry')
+      try {
+        const events: Record<string, unknown>[] = []
+        for (const file of (await readdir(directory)).sort()) {
+          const text = await readFile(join(directory, file), 'utf8')
+          events.push(...text.split('\n').filter(line => line.length > 0).map(line => JSON.parse(line) as Record<string, unknown>))
+        }
+        return events
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+        throw error
+      }
+    },
     harness(patches: string[], options: HarnessOptions = {}): DeepSeekHarness {
+      const dshHome = options.dshHome ?? join(root, '.dsh-' + String(harnesses.size))
+      latestHome = dshHome
       const harness = new DeepSeekHarness({
         cwd: root,
         processCwd: root,
-        dshHome: options.dshHome ?? join(root, '.dsh-' + String(harnesses.size)),
+        dshHome,
         env: {
           ...process.env,
           DSH_PERMISSION_MODE: options.permissionMode ?? 'danger-full-access',

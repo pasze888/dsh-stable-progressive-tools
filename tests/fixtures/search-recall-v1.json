@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "catalog": [
+    { "name": "github.list_pull_requests", "description": "List pull requests in a GitHub repository" },
+    { "name": "github.search_pull_requests", "description": "Search GitHub pull requests" },
+    { "name": "github.get_issue", "description": "Read a GitHub issue" },
+    { "name": "github.create_issue", "description": "Create a GitHub issue" },
+    { "name": "fs.read_file", "description": "Read a file from the workspace" },
+    { "name": "fs.write_file", "description": "Write a file in the workspace" },
+    { "name": "shell.run_command", "description": "Run a shell command" }
+  ],
+  "queries": [
+    {
+      "id": "pull-requests",
+      "query": "pull request",
+      "namespace": "github",
+      "relevant": ["github.list_pull_requests", "github.search_pull_requests"]
+    },
+    {
+      "id": "issues",
+      "query": "issue",
+      "namespace": "github",
+      "relevant": ["github.get_issue", "github.create_issue"]
+    },
+    {
+      "id": "read-file",
+      "query": "read",
+      "namespace": "fs",
+      "relevant": ["fs.read_file"]
+    },
+    {
+      "id": "unmatched-shell",
+      "query": "does-not-exist",
+      "relevant": ["shell.run_command"]
+    }
+  ]
+}

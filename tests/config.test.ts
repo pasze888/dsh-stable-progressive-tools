@@ -11,6 +11,7 @@ describe('resolveConfig', () => {
       maxSummaryChars: 240,
       maxQueryChars: 500,
       zeroMatch: 'catalog',
+      telemetry: { sampleSuccessRate: 0.1 },
     })
   })
 
@@ -23,5 +24,6 @@ describe('resolveConfig', () => {
     expect(() => resolveConfig({ maxSearchResults: 0 })).toThrow(/positive safe integer/)
     expect(() => resolveConfig({ maxSummaryChars: 0 })).toThrow(/positive safe integer/)
     expect(() => resolveConfig({ maxQueryChars: 0 })).toThrow(/positive safe integer/)
+    expect(() => resolveConfig({ telemetry: { sampleSuccessRate: 1.1 } })).toThrow(/between 0 and 1/)
   })
 })

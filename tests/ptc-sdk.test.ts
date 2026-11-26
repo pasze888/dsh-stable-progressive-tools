@@ -30,7 +30,11 @@ it('discovers, describes, and executes hidden tools through the official SDK', {
   ]
   const fixture = await createSdkFixture('stable-ptc-sdk', scripted(script))
   const { root, requests } = fixture
-  const harness = fixture.harness(await stablePtcPatches(root, { eagerTools: ['fixture_eager'], shellTool: 'none' }))
+  const harness = fixture.harness(await stablePtcPatches(root, {
+    eagerTools: ['fixture_eager'],
+    shellTool: 'none',
+    telemetry: { sampleSuccessRate: 1 },
+  }))
 
   const result = await harness.session('hidden-workflow').run('Run the hidden fixture workflow')
 
@@ -80,6 +84,27 @@ it('discovers, describes, and executes hidden tools through the official SDK', {
   expect(JSON.stringify(requests[6]?.messages)).not.toContain('fixture_restricted')
   for (const request of requests.slice(1)) expect(JSON.stringify(request.system)).toBe(initialSystem)
   expect(result.events.some(event => event.type === 'tool/result' && event.data.error !== undefined)).toBe(false)
+  const telemetry = await fixture.telemetry()
+  expect(telemetry.find(event => event.type === 'session-open')).toMatchObject({
+    mode: 'code',
+    cacheEpoch: 'session:hidden-workflow',
+    requestedShell: 'none',
+    selectedShell: null,
+  })
+  const search = telemetry.find(event => event.type === 'search')!
+  expect(search).toMatchObject({ resultCount: 1, totalCount: 1, fallback: false })
+  expect(search.durationMs).toBeGreaterThanOrEqual(0)
+  expect(search.resultBytes).toBeGreaterThan(0)
+  expect(search.schemaHashes).toEqual([expect.stringMatching(/^[a-f0-9]{64}$/)])
+  const describe = telemetry.find(event => event.type === 'describe')!
+  expect(describe).toMatchObject({ requestedCount: 6, resultCount: 6 })
+  expect(describe.durationMs).toBeGreaterThanOrEqual(0)
+  expect(describe.resultBytes).toBeGreaterThan(0)
+  expect(describe.schemaHashes).toHaveLength(6)
+  expect(JSON.stringify(telemetry)).not.toContain('fixture_hidden')
+  expect(JSON.stringify(telemetry)).not.toContain('hidden-ok')
+  expect(JSON.stringify(telemetry)).not.toContain('remove-and-restrict')
+  expect(JSON.stringify(fixture.requests)).not.toContain('plugin:stable-progressive-tools/telemetry')
 })
 
 it('returns a Describe disclosure larger than the retired byte budget without truncation', { timeout: 60_000 }, async () => {
@@ -267,6 +292,11 @@ it('enforces disclosed Schema hashes while preserving live runtime errors', { ti
   expect(events).toContain('"code":"TOOL_SCHEMA_CHANGED"')
   expect(events).toContain('"code":"INVALID_ARGS"')
   expect(events).not.toContain('describedSchemaHash')
+  expect((await fixture.telemetry()).find(event => event.type === 'schema-change')).toMatchObject({
+    toolName: 'fixture_schema',
+    oldSchemaHash: v1.tools[0]!.schemaHash,
+    newSchemaHash: v2.tools[0]!.schemaHash,
+  })
   const initialSystem = JSON.stringify(fixture.requests[0]?.system)
   for (const request of fixture.requests.slice(1)) expect(JSON.stringify(request.system)).toBe(initialSystem)
 })
@@ -442,6 +472,45 @@ it('keeps Surface bytes unchanged while Compaction starts a new Cache Epoch', { 
   expect(JSON.stringify(fixture.requests[2]?.system)).toBe(JSON.stringify(fixture.requests[0]?.system))
 })
 
+it('always emits Search fallback and conflict events when success sampling is zero', { timeout: 60_000 }, async () => {
+  const fixture = await createSdkFixture('stable-ptc-telemetry-fallback', scripted([
+    runCode('fallback-search', 'return await tools.search_tools({ query: "no-such-tool-sentinel" })'),
+    { type: 'text', text: 'fallback complete' },
+  ]))
+  const harness = fixture.harness(await stablePtcPatches(fixture.root, {
+    zeroMatch: 'catalog',
+    shellTool: 'none',
+    telemetry: { sampleSuccessRate: 0 },
+  }))
+
+  const result = await harness.session('telemetry-fallback').run('Exercise fallback Telemetry')
+
+  expect(result.finalResponse).toBe('fallback complete')
+  const telemetry = await fixture.telemetry()
+  expect(telemetry.find(event => event.type === 'fallback')).toMatchObject({
+    operation: 'search',
+    reason: 'zero-match-catalog',
+  })
+  expect(telemetry.some(event => event.type === 'search')).toBe(false)
+  expect(JSON.stringify(telemetry)).not.toContain('no-such-tool-sentinel')
+})
+
+it('reports an SDK-section conflict without claiming a Stable Surface rewrite', { timeout: 60_000 }, async () => {
+  const fixture = await createSdkFixture('stable-ptc-telemetry-conflict', () => ({ type: 'text', text: 'conflict complete' }))
+  const patches = await stablePtcPatches(fixture.root, { shellTool: 'none' })
+  patches.push(fileURLToPath(new URL('./fixtures/missing-sdk.yml', import.meta.url)))
+  const harness = fixture.harness(patches)
+
+  const result = await harness.session('telemetry-conflict').run('Exercise a missing SDK section')
+
+  expect(result.finalResponse).toBe('conflict complete')
+  expect((await fixture.telemetry()).find(event => event.type === 'surface-conflict')).toMatchObject({
+    owner: 'tools:sdk',
+    reason: 'missing-section',
+    action: 'return-original',
+  })
+})
+
 it('keeps ordinary PTC byte-for-byte unchanged when the evaluation preset is installed', { timeout: 60_000 }, async () => {
   const fixture = await createSdkFixture('stable-ptc-ordinary', () => ({ type: 'text', text: 'ordinary PTC complete' }))
   const runtimePatch = fileURLToPath(new URL('./fixtures/preset-runtime.yml', import.meta.url))
@@ -472,6 +541,7 @@ it('enforces Search query and zero-match budgets through run_code', { timeout: 6
     maxQueryChars: 8,
     zeroMatch: 'empty',
     shellTool: 'none',
+    telemetry: { sampleSuccessRate: 0 },
   }))
 
   const result = await harness.session('search-budgets').run('Exercise Search budgets')
@@ -481,6 +551,11 @@ it('enforces Search query and zero-match budgets through run_code', { timeout: 6
   expect(JSON.stringify(fixture.requests[1]?.messages)).toContain('\\"results\\": []')
   expect(JSON.stringify(fixture.requests[1]?.messages)).toContain('\\"fallback\\": false')
   expect(JSON.stringify(fixture.requests[2]?.messages)).toContain('maxQueryChars')
+  const telemetry = await fixture.telemetry()
+  expect(telemetry.some(event => event.type === 'session-open')).toBe(true)
+  expect(telemetry.some(event => event.type === 'search' || event.type === 'describe')).toBe(false)
+  expect(telemetry.find(event => event.type === 'error')).toMatchObject({ operation: 'search', reason: 'query-too-long' })
+  expect(JSON.stringify(telemetry)).not.toContain('123456789')
 })
 
 it('rejects an unavailable Eager Tool before emitting a mutated model request', { timeout: 60_000 }, async () => {
@@ -494,6 +569,10 @@ it('rejects an unavailable Eager Tool before emitting a mutated model request', 
 
   expect(result.finishReason).toBe('error')
   expect(JSON.stringify(result.events)).toContain('Configured eager tool is not available: fixture_missing')
+  expect((await fixture.telemetry()).find(event => event.type === 'error')).toMatchObject({
+    operation: 'surface',
+    reason: 'eager-tool-unavailable',
+  })
   expect(fixture.requests).toHaveLength(0)
 })
 

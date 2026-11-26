@@ -12,6 +12,7 @@ export default defineConfig({
       '@deepseek-ai/dsh-llm',
       '@deepseek-ai/dsh-ptc-runtime',
       '@deepseek-ai/dsh-scope',
+      '@deepseek-ai/dsh-session',
       '@deepseek-ai/dsh-system-prompt',
       '@deepseek-ai/dsh-tool-executor-ptc',
       '@deepseek-ai/dsh-tools',

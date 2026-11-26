@@ -1,0 +1,3 @@
+- insert:
+    - id: stable-ptc-missing-sdk
+      name: './missing-sdk.mjs'
