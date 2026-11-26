@@ -2,7 +2,7 @@
 
 DeepSeek Harness 的会话稳定渐进式工具披露插件。
 
-设计依据：[`../research/dsh-stable-progressive-tools-design.md`](../research/dsh-stable-progressive-tools-design.md)。
+设计依据：[`docs/adr/0001-preset-scoped-stable-progressive-tools.md`](docs/adr/0001-preset-scoped-stable-progressive-tools.md)，其中包含已接受的设计决策和原始设计附录。
 
 ## 当前状态
 
