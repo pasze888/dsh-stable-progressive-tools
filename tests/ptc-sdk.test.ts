@@ -1,3 +1,5 @@
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { expect, it } from 'vitest'
 import {
@@ -304,6 +306,140 @@ it('replays a legacy Describe disclosure without presentation metadata', { timeo
   const stale = toolResultText(fixture.requests[2]!, 'legacy-stale-call')
   expect(stale).toContain('TOOL_SCHEMA_CHANGED')
   expect(stale).not.toContain('Invalid describe_tools disclosure metadata')
+})
+
+it('restores the complete Surface and disclosure history after a process restart', { timeout: 60_000 }, async () => {
+  const fixture = await createSdkFixture('stable-ptc-resume', (_request, requests) => {
+    if (requests.length === 1) return runCode('resume-describe', 'return await tools.describe_tools({ names: ["fixture_hidden"] })')
+    if (requests.length === 2) return { type: 'text', text: 'before restart complete' }
+    return { type: 'text', text: 'after restart complete' }
+  })
+  const home = join(fixture.root, 'shared-home')
+  const first = fixture.harness(await stablePtcPatches(fixture.root, {
+    eagerTools: ['fixture_eager'],
+    shellTool: 'none',
+  }), { dshHome: home })
+  const initial = await first.session('resume-surface').run('Create and Describe before restart')
+  expect(initial.finalResponse).toBe('before restart complete')
+  const initialSystem = JSON.stringify(fixture.requests[0]?.system)
+  await first.close()
+
+  const second = fixture.harness(await stablePtcPatches(fixture.root, {
+    eagerTools: [],
+    shellTool: 'auto',
+  }), { dshHome: home })
+  const resumed = await second.resumeSession('resume-surface')
+  expect(fixture.requests).toHaveLength(2)
+  const result = await resumed.run('Resume with a different plugin configuration')
+
+  expect(result.finalResponse).toBe('after restart complete')
+  expect(fixture.requests).toHaveLength(3)
+  expect(JSON.stringify(fixture.requests[2]?.system)).toBe(initialSystem)
+  expect(JSON.stringify(fixture.requests[2]?.system)).toContain('fixture_eager')
+  expect(JSON.stringify(fixture.requests[2]?.system)).not.toContain('bash:')
+  expect(JSON.stringify(fixture.requests[2]?.messages)).toContain('inputSchema')
+  expect(JSON.stringify(fixture.requests[2]?.messages)).toContain('sdkExcerpt')
+})
+
+it('rolls back an unpublished Surface when persistence fails and retries honestly', { timeout: 60_000 }, async () => {
+  const fixture = await createSdkFixture('stable-ptc-write-retry', () => ({ type: 'text', text: 'Surface retry complete' }))
+  const home = join(fixture.root, 'retry-home')
+  await mkdir(home, { recursive: true })
+  const blocker = join(home, 'stable-progressive-tools')
+  await writeFile(blocker, 'block the Surface directory')
+  const harness = fixture.harness(await stablePtcPatches(fixture.root, { shellTool: 'none' }), { dshHome: home })
+  const session = harness.session('surface-write-retry')
+  const failed = await session.run('Fail the first Surface write')
+  expect(failed.finishReason).toBe('error')
+  expect(JSON.stringify(failed.events)).toContain('cannot commit recovery record')
+  expect(fixture.requests).toHaveLength(0)
+
+  await rm(blocker)
+  const retried = await session.run('Retry the Surface write')
+  expect(retried.finalResponse).toBe('Surface retry complete')
+  expect(fixture.requests).toHaveLength(1)
+  const record = join(home, 'stable-progressive-tools', 'surfaces', Buffer.from(failed.sessionId).toString('base64url') + '.json')
+  expect(JSON.parse(await readFile(record, 'utf8')).version).toBe(1)
+})
+
+it('fails honestly when a persisted Surface record is corrupt', { timeout: 60_000 }, async () => {
+  const fixture = await createSdkFixture('stable-ptc-corrupt-surface', () => ({ type: 'text', text: 'before corruption complete' }))
+  const home = join(fixture.root, 'shared-home')
+  const first = fixture.harness(await stablePtcPatches(fixture.root, { shellTool: 'none' }), { dshHome: home })
+  const initial = await first.session('corrupt-surface').run('Create a durable Surface')
+  expect(initial.finalResponse).toBe('before corruption complete')
+  await first.close()
+  const record = join(home, 'stable-progressive-tools', 'surfaces', Buffer.from('corrupt-surface').toString('base64url') + '.json')
+  await writeFile(record, '{not-json')
+
+  const second = fixture.harness(await stablePtcPatches(fixture.root, { shellTool: 'none' }), { dshHome: home })
+  const resumed = await second.resumeSession('corrupt-surface')
+  const result = await resumed.run('The corrupt Surface must not be replaced')
+
+  expect(result.finishReason).toBe('error')
+  expect(JSON.stringify(result.events)).toContain('invalid recovery record')
+  expect(fixture.requests).toHaveLength(1)
+})
+
+it('inherits the parent Surface and disclosure history through fork', { timeout: 60_000 }, async () => {
+  const fixture = await createSdkFixture('stable-ptc-fork', (request, requests) => {
+    const messages = JSON.stringify(request.messages)
+    const lastMessage = JSON.stringify((request.messages as unknown[]).at(-1))
+    if (lastMessage.includes('Return the forked child response.')) return { type: 'text', text: 'fork child complete' }
+    if (messages.includes('fork child complete') && messages.includes('wait_agent')) return { type: 'text', text: 'fork parent complete' }
+    if (requests.length === 1) return runCode('fork-describe', 'return await tools.describe_tools({ names: ["fixture_hidden"] })')
+    if (requests.length === 2) return runCode('remove-eager', 'return await tools.fixture_remove_eager({ value: "remove" })')
+    if (requests.length === 3) return { type: 'text', text: 'fork setup complete' }
+    if (requests.length === 4) return runCode('fork-call', 'return await tools.subagent_fork({ description: "Fork Surface", prompt: "Return the forked child response." })')
+    return runCode('fork-wait', 'return await tools.wait_agent({ timeout_ms: 10000 })')
+  })
+  const home = join(fixture.root, 'fork-home')
+  const harness = fixture.harness(await stablePtcPatches(fixture.root, {
+    activation: { includeSubagents: true },
+    eagerTools: ['fixture_eager'],
+    shellTool: 'none',
+  }), { dshHome: home })
+
+  const session = harness.session('fork-parent')
+  const setup = await session.run('Describe before the fork')
+  expect(setup.finalResponse).toBe('fork setup complete')
+  const result = await session.run('Fork after removing an Eager Tool')
+
+  expect(result.finalResponse).toBe('fork parent complete')
+  expect(fixture.requests).toHaveLength(7)
+  const parentInitial = JSON.stringify(fixture.requests[0]?.system)
+  const child = fixture.requests.find(request => JSON.stringify((request.messages as unknown[]).at(-1)).includes('Return the forked child response.'))!
+  expect(JSON.stringify(child.system)).toBe(parentInitial)
+  expect(JSON.stringify(child.messages)).toContain('inputSchema')
+  expect(JSON.stringify(child.messages)).toContain('sdkExcerpt')
+  for (const request of fixture.requests.filter(item => item !== child)) {
+    expect(JSON.stringify(request.system)).toBe(parentInitial)
+  }
+  const childNotification = result.notifications.find(notification => notification.method === 'session.event'
+    && notification.params.sessionId !== 'fork-parent')
+  const childId = childNotification?.params.sessionId
+  expect(typeof childId).toBe('string')
+  const childRecord = join(home, 'stable-progressive-tools', 'surfaces', Buffer.from(childId as string).toString('base64url') + '.json')
+  expect(JSON.parse(await readFile(childRecord, 'utf8')).version).toBe(1)
+})
+
+it('keeps Surface bytes unchanged while Compaction starts a new Cache Epoch', { timeout: 60_000 }, async () => {
+  const fixture = await createSdkFixture('stable-ptc-compaction', (_request, requests) => {
+    if (requests.length === 1) return { type: 'text', text: 'before Compaction complete' }
+    if (requests.length === 2) return { type: 'text', text: 'Compaction summary' }
+    return { type: 'text', text: 'after Compaction complete' }
+  })
+  const harness = fixture.harness(await stablePtcPatches(fixture.root, { shellTool: 'none' }))
+  const session = harness.session('compact-surface')
+  const before = await session.run('Run before Compaction')
+  expect(before.finalResponse).toBe('before Compaction complete')
+  const compact = await session.run('/compact')
+  expect(compact.events.some(event => event.type === 'compaction/start')).toBe(true)
+  const after = await session.run('Run after Compaction')
+
+  expect(after.finalResponse).toBe('after Compaction complete')
+  expect(fixture.requests).toHaveLength(3)
+  expect(JSON.stringify(fixture.requests[2]?.system)).toBe(JSON.stringify(fixture.requests[0]?.system))
 })
 
 it('keeps ordinary PTC byte-for-byte unchanged when the evaluation preset is installed', { timeout: 60_000 }, async () => {

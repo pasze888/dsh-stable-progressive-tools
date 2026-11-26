@@ -52,7 +52,11 @@ export function apply(ctx) {
   for (const name of ['constructor', 'toString', '__proto__']) {
     ctx.tools.register(fixtureTool(name, args => Promise.resolve({ value: args.value })))
   }
-  ctx.tools.register(fixtureTool('fixture_eager', args => Promise.resolve({ value: args.value })))
+  const removeEager = ctx.tools.register(fixtureTool('fixture_eager', args => Promise.resolve({ value: args.value })))
+  ctx.tools.register(fixtureTool('fixture_remove_eager', () => {
+    removeEager()
+    return Promise.resolve({ value: 'eager-removed' })
+  }))
   ctx.tools.register(fixtureTool('fixture_legacy_describe', (args, exec) => {
     exec.agent.session.append('tool/ptc-dispatch', {
       rootCallId: exec.callId,

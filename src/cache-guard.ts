@@ -14,6 +14,6 @@ export function assertSurfaceContinuity(expected: SessionSurface, actual: Sessio
 }
 
 /** Compaction may explicitly create a new epoch; ordinary requests must not. */
-export function compactedEpoch(surface: SessionSurface, compactionId: string): string {
+export function compactedEpoch(surface: Pick<SessionSurface, 'cacheEpoch'>, compactionId: string): string {
   return surface.cacheEpoch + ':compaction:' + compactionId
 }

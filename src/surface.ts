@@ -14,6 +14,15 @@ export const STABLE_DISCLOSURE_PROMPT = [
 
 export type PresentationMode = 'native' | 'code' | 'both'
 
+export type SurfacePayload = Omit<SessionSurface, 'sessionId' | 'cacheEpoch' | 'surfaceHash'>
+
+export class SurfaceRestoreError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = 'SurfaceRestoreError'
+  }
+}
+
 export interface OpenSessionInput {
   sessionId: string
   presetId: string
@@ -90,6 +99,28 @@ export class SurfaceManager {
     })
     this.surfaces.set(input.sessionId, surface)
     return surface
+  }
+
+  /** Adopt a validated durable payload without consulting current configuration or tool availability. */
+  restore(surface: SessionSurface): SessionSurface {
+    const existing = this.surfaces.get(surface.sessionId)
+    if (existing) return existing
+    const { sessionId: _sessionId, cacheEpoch: _cacheEpoch, surfaceHash: _surfaceHash, presetId: _presetId, ...fixed } = surface
+    if (hashSurface(fixed) !== surface.surfaceHash) {
+      throw new SurfaceRestoreError('Stable Surface restoration failed: SurfaceHash mismatch')
+    }
+    const restored = deepFreeze(structuredClone(surface))
+    this.surfaces.set(surface.sessionId, restored)
+    return restored
+  }
+
+  /** Advance only the Cache Epoch after a committed Compaction event. */
+  syncEpoch(sessionId: string, cacheEpoch: string): SessionSurface | undefined {
+    const surface = this.surfaces.get(sessionId)
+    if (surface === undefined || surface.cacheEpoch === cacheEpoch) return surface
+    const updated = deepFreeze({ ...surface, cacheEpoch })
+    this.surfaces.set(sessionId, updated)
+    return updated
   }
 
   get(sessionId: string): SessionSurface | undefined { return this.surfaces.get(sessionId) }

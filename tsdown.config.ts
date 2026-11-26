@@ -8,6 +8,7 @@ export default defineConfig({
     neverBundle: [
       '@deepseek-ai/cordis',
       '@deepseek-ai/dsh-agent',
+      '@deepseek-ai/dsh-home-paths',
       '@deepseek-ai/dsh-llm',
       '@deepseek-ai/dsh-ptc-runtime',
       '@deepseek-ai/dsh-scope',

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { createSurfaceManager } from '../src/index.ts'
-import { assertSurfaceContinuity } from '../src/cache-guard.ts'
+import { createSurfaceManager, SurfaceRestoreError } from '../src/index.ts'
+import { assertSurfaceContinuity, compactedEpoch } from '../src/cache-guard.ts'
 import { DESCRIBE_TOOLS_NAME, SEARCH_TOOLS_NAME } from '../src/config.ts'
 import type { ToolSdkSchema } from '@deepseek-ai/dsh-tool-executor-ptc'
 
@@ -78,6 +78,27 @@ describe('SurfaceManager', () => {
     const second = createSurfaceManager(config).open({ ...input, declarations: reordered })!
     expect(second.sdkText).toBe(first.sdkText)
     expect(second.surfaceHash).toBe(first.surfaceHash)
+  })
+
+  it('restores the canonical Surface and rejects a mismatched hash', () => {
+    const original = createSurfaceManager({ eagerTools: ['read'], shellTool: 'none' }).open(input)!
+    const restored = createSurfaceManager({ eagerTools: ['grep'], shellTool: 'auto' }).restore({ ...original, sessionId: 'restored-a' })
+    expect(restored.sdkText).toBe(original.sdkText)
+    expect(restored.declarations).toEqual(original.declarations)
+    expect(() => createSurfaceManager().restore({ ...original, sessionId: 'restored-bad', sdkText: 'changed' }))
+      .toThrow(SurfaceRestoreError)
+  })
+
+  it('changes only the Cache Epoch after Compaction', () => {
+    const manager = createSurfaceManager()
+    const first = manager.open(input)!
+    expect(manager.syncEpoch(input.sessionId, first.cacheEpoch)).toBe(first)
+    const compacted = manager.syncEpoch(input.sessionId, compactedEpoch(first, 'compaction-1'))!
+    expect(compacted.cacheEpoch).not.toBe(first.cacheEpoch)
+    expect(compacted.sdkText).toBe(first.sdkText)
+    expect(compacted.surfaceHash).toBe(first.surfaceHash)
+    expect(manager.get(input.sessionId)).toBe(compacted)
+    expect(() => assertSurfaceContinuity(first, compacted)).toThrow()
   })
 
   it('shares surface hashes but not cache epochs across sessions', () => {

@@ -10,6 +10,8 @@ import { SurfaceManager } from './surface.ts'
 import { canonicalJsonHash } from './hash.ts'
 import { registerDisclosureHistory } from './disclosure-history.ts'
 import { ToolSchemaChangedError } from './invocation.ts'
+import { registerSurfaceHistory } from './surface-history.ts'
+import { readSurfaceRecord, writeSurfaceRecord } from './surface-store.ts'
 
 const INFRASTRUCTURE_NAMES = new Set([RUN_CODE_NAME, SEARCH_TOOLS_NAME, DESCRIBE_TOOLS_NAME, INVOKE_TOOL_NAME])
 
@@ -71,6 +73,7 @@ function renderSdk(ctx: Context, schemas: readonly ToolSdkSchema[]): string {
 
 export async function installStablePtc(ctx: Context, config: ResolvedConfig): Promise<void> {
   const disclosureHistory = await registerDisclosureHistory(ctx)
+  const surfaceHistory = await registerSurfaceHistory(ctx)
   const searchTool = defineTool({
     name: SEARCH_TOOLS_NAME,
     description: 'Search the live tool catalog by exact names and description words without changing tool permissions.',
@@ -195,27 +198,50 @@ export async function installStablePtc(ctx: Context, config: ResolvedConfig): Pr
     if (agent === undefined || !isStableSurfaceEnabled(agent)) return assembly
     const sdkIndex = assembly.sections.findIndex(section => section.name === 'tools:sdk')
     if (sdkIndex < 0) return assembly
+    const history = surfaceHistory.stateOf(agent.session)
     let surface = surfaces.get(agent.session.id)
-    if (surface === undefined) {
-      for (const expected of [searchTool, describeTool]) {
-        const current = ctx.tools.get(expected.name, agent, context.toolSet)
-        if (current !== expected) throw new Error('stable-progressive-tools discovery tool is unavailable or shadowed: ' + expected.name)
+    if (surface === undefined) try {
+      const record = await readSurfaceRecord(agent.session)
+      if (record !== undefined) {
+        surface = surfaces.restore({
+          sessionId: agent.session.id,
+          cacheEpoch: history.cacheEpoch,
+          surfaceHash: record.surfaceHash,
+          ...record.surface,
+        })
+        // Persist inherited Surfaces into each fork, so later descendants need only their direct parent.
+        await writeSurfaceRecord(agent.session, surface)
+      } else {
+        if (history.hasPresentationHistory) {
+          throw new Error('Stable Surface restoration failed: recovery record is missing from existing history')
+        }
+        for (const expected of [searchTool, describeTool]) {
+          const current = ctx.tools.get(expected.name, agent, context.toolSet)
+          if (current !== expected) throw new Error('stable-progressive-tools discovery tool is unavailable or shadowed: ' + expected.name)
+        }
+        const declarations = ctx.tools.definitions(agent, context.toolSet)
+          .filter(definition => definition.name !== RUN_CODE_NAME && definition.name !== INVOKE_TOOL_NAME)
+          .map(sdkSchema)
+        surface = surfaces.open({
+          sessionId: agent.session.id,
+          presetId: 'stable-ptc-eval',
+          origin: agent.session.header.origin === 'subagent' ? 'subagent' : 'user',
+          mode: 'code',
+          platform: process.platform,
+          availableTools: declarations.map(declaration => declaration.name),
+          declarations,
+          programFormat: ctx.get('ptcRuntime')?.programFormat ?? 'function-body',
+        })
+        if (surface === undefined) return assembly
+        await writeSurfaceRecord(agent.session, surface)
       }
-      const declarations = ctx.tools.definitions(agent, context.toolSet)
-        .filter(definition => definition.name !== RUN_CODE_NAME && definition.name !== INVOKE_TOOL_NAME)
-        .map(sdkSchema)
-      surface = surfaces.open({
-        sessionId: agent.session.id,
-        presetId: 'stable-ptc-eval',
-        origin: agent.session.header.origin === 'subagent' ? 'subagent' : 'user',
-        mode: 'code',
-        platform: process.platform,
-        availableTools: declarations.map(declaration => declaration.name),
-        declarations,
-        programFormat: ctx.get('ptcRuntime')?.programFormat ?? 'function-body',
-      })
-      if (surface === undefined) return assembly
+    } catch (error) {
+      // SurfaceManager.open()/restore() publish to memory before the async file commit.
+      // Roll that publication back so a later assembly retries persistence instead of bypassing it.
+      surfaces.close(agent.session.id)
+      throw error
     }
+    surface = surfaces.syncEpoch(agent.session.id, history.cacheEpoch) ?? surface
     return {
       ...assembly,
       sections: assembly.sections.map((section, index) => index === sdkIndex ? { ...section, text: surface.sdkText } : section),

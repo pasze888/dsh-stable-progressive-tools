@@ -59,6 +59,7 @@ export async function stablePtcPatches(root: string, config?: Record<string, unk
 interface HarnessOptions {
   permissionMode?: 'danger-full-access' | 'workspace-write'
   approvalRequests?: boolean
+  dshHome?: string
 }
 
 /** Own one controlled endpoint and all SDK subprocesses used by a single test. */
@@ -105,7 +106,7 @@ export async function createSdkFixture(
       const harness = new DeepSeekHarness({
         cwd: root,
         processCwd: root,
-        dshHome: join(root, '.dsh-' + String(harnesses.size)),
+        dshHome: options.dshHome ?? join(root, '.dsh-' + String(harnesses.size)),
         env: {
           ...process.env,
           DSH_PERMISSION_MODE: options.permissionMode ?? 'danger-full-access',
