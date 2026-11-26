@@ -18,7 +18,7 @@ function scripted(script: ModelContent[]) {
 
 it('discovers, describes, and executes hidden tools through the official SDK', { timeout: 60_000 }, async () => {
   const script = [
-    runCode('search-call', 'return await tools.search_tools({ query: "hidden fixture" })'),
+    runCode('search-call', 'return await tools.search_tools({ query: "fixture_hidden" })'),
     runCode('describe-call', 'return await tools.describe_tools({ names: ["fixture_hidden", "fixture.page.alpha", "fixture.page.beta", "fixture.page.gamma", "fixture_eager", "fixture_mutate_catalog"] })'),
     runCode('hidden-call', 'return await tools.fixture_hidden({ value: "hidden-ok" })'),
     runCode('punctuated-call', 'return await tools["fixture.page.alpha"]({ value: "punctuation-ok" })'),
@@ -226,6 +226,84 @@ it('keeps Search cursors consistent across catalog changes', { timeout: 60_000 }
   expect(secondPage.nextCursor).toBeUndefined()
   const initialSystem = JSON.stringify(fixture.requests[0]?.system)
   for (const request of fixture.requests.slice(1)) expect(JSON.stringify(request.system)).toBe(initialSystem)
+})
+
+it('enforces disclosed Schema hashes while preserving live runtime errors', { timeout: 60_000 }, async () => {
+  const script = [
+    runCode('undisclosed-call', 'return await tools.fixture_hidden({ value: "undisclosed-ok" })'),
+    runCode('describe-v1', 'return await tools.describe_tools({ names: ["fixture_schema"] })'),
+    runCode('change-schema', 'return await tools.fixture_change_schema({ value: "change" })'),
+    runCode('stale-call', 'return await tools.fixture_schema({ value: 2 })'),
+    runCode('describe-v2', 'return await tools.describe_tools({ names: ["fixture_schema"] })'),
+    runCode('retry-call', 'return await tools.fixture_schema({ value: 2 })'),
+    runCode('invalid-call', 'return await tools.fixture_schema({ value: "wrong" })'),
+    runCode('mutate-call', 'return await tools.fixture_mutate_catalog({ value: "remove-and-restrict" })'),
+    runCode('deleted-call', 'return await tools.fixture_late({ value: "deleted" })'),
+    runCode('restricted-call', 'return await tools.fixture_restricted({ value: "restricted" })'),
+    { type: 'text', text: 'schema workflow complete' },
+  ]
+  const fixture = await createSdkFixture('stable-ptc-schema', scripted(script))
+  const harness = fixture.harness(await stablePtcPatches(fixture.root, { shellTool: 'none' }))
+
+  const result = await harness.session('schema-history').run('Exercise Schema history and live errors')
+
+  expect(result.finalResponse).toBe('schema workflow complete')
+  expect(fixture.requests).toHaveLength(11)
+  expect(JSON.stringify(fixture.requests[1]?.messages)).toContain('undisclosed-ok')
+  const v1 = JSON.parse(toolResultText(fixture.requests[2]!, 'describe-v1')) as { tools: { schemaHash: string }[] }
+  const stale = toolResultText(fixture.requests[4]!, 'stale-call')
+  expect(stale).toContain('TOOL_SCHEMA_CHANGED')
+  expect(stale).toContain('describe the tool again')
+  const v2 = JSON.parse(toolResultText(fixture.requests[5]!, 'describe-v2')) as { tools: { schemaHash: string }[] }
+  expect(v2.tools[0]!.schemaHash).not.toBe(v1.tools[0]!.schemaHash)
+  expect(JSON.parse(toolResultText(fixture.requests[6]!, 'retry-call'))).toEqual({ value: 2 })
+  expect(toolResultText(fixture.requests[7]!, 'invalid-call')).toContain('invalid arguments')
+  expect(JSON.stringify(fixture.requests[8]?.messages)).toContain('catalog-mutated')
+  expect(toolResultText(fixture.requests[9]!, 'deleted-call')).toContain('tools.fixture_late is not a function')
+  expect(toolResultText(fixture.requests[10]!, 'restricted-call')).toContain('tools.fixture_restricted is not a function')
+  const events = JSON.stringify(result.events)
+  expect(events).toContain('"code":"TOOL_SCHEMA_CHANGED"')
+  expect(events).toContain('"code":"INVALID_ARGS"')
+  expect(events).not.toContain('describedSchemaHash')
+  const initialSystem = JSON.stringify(fixture.requests[0]?.system)
+  for (const request of fixture.requests.slice(1)) expect(JSON.stringify(request.system)).toBe(initialSystem)
+})
+
+it('does not invent disclosures for Object prototype tool names', { timeout: 60_000 }, async () => {
+  const fixture = await createSdkFixture('stable-ptc-prototype-names', scripted([
+    runCode('constructor-call', 'return await tools["constructor"]({ value: "constructor-ok" })'),
+    runCode('to-string-call', 'return await tools["toString"]({ value: "to-string-ok" })'),
+    runCode('proto-call', 'return await tools["__proto__"]({ value: "proto-ok" })'),
+    { type: 'text', text: 'prototype names complete' },
+  ]))
+  const harness = fixture.harness(await stablePtcPatches(fixture.root, { shellTool: 'none' }))
+
+  const result = await harness.session('prototype-names').run('Call undisclosed prototype-named tools')
+
+  expect(result.finalResponse).toBe('prototype names complete')
+  for (const [index, callId, value] of [
+    [1, 'constructor-call', 'constructor-ok'],
+    [2, 'to-string-call', 'to-string-ok'],
+    [3, 'proto-call', 'proto-ok'],
+  ] as const) {
+    expect(JSON.parse(toolResultText(fixture.requests[index]!, callId))).toEqual({ value })
+  }
+})
+
+it('replays a legacy Describe disclosure without presentation metadata', { timeout: 60_000 }, async () => {
+  const fixture = await createSdkFixture('stable-ptc-legacy-disclosure', scripted([
+    runCode('legacy-describe-call', 'return await tools.fixture_legacy_describe({ value: "' + 'a'.repeat(64) + '" })'),
+    runCode('legacy-stale-call', 'return await tools.fixture_schema({ value: "current" })'),
+    { type: 'text', text: 'legacy disclosure complete' },
+  ]))
+  const harness = fixture.harness(await stablePtcPatches(fixture.root, { shellTool: 'none' }))
+
+  const result = await harness.session('legacy-disclosure').run('Replay a legacy Describe record')
+
+  expect(result.finalResponse).toBe('legacy disclosure complete')
+  const stale = toolResultText(fixture.requests[2]!, 'legacy-stale-call')
+  expect(stale).toContain('TOOL_SCHEMA_CHANGED')
+  expect(stale).not.toContain('Invalid describe_tools disclosure metadata')
 })
 
 it('keeps ordinary PTC byte-for-byte unchanged when the evaluation preset is installed', { timeout: 60_000 }, async () => {

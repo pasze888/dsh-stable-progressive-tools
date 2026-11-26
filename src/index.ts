@@ -8,10 +8,10 @@ import { SurfaceManager } from './surface.ts'
 import { installStablePtc } from './host.ts'
 
 export const name = 'stable-progressive-tools'
-export const inject = ['tools', 'systemPrompt', 'ptcRuntime']
+export const inject = ['tools', 'systemPrompt', 'ptcRuntime', 'sessionProjections']
 
-export function apply(ctx: Context, config: Config = {}): void {
-  installStablePtc(ctx, resolveConfig(config))
+export async function apply(ctx: Context, config: Config = {}): Promise<void> {
+  await installStablePtc(ctx, resolveConfig(config))
 }
 
 export function createSurfaceManager(config: Config = {}): SurfaceManager {

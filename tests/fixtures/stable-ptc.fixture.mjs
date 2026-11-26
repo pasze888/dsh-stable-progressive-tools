@@ -28,10 +28,52 @@ function fixtureTool(name, execute, reordered = false) {
   })
 }
 
+function schemaFixtureTool(version) {
+  const type = version === 1 ? 'string' : 'number'
+  return defineTool({
+    name: 'fixture_schema',
+    description: `Return the schema fixture version ${version} value.`,
+    parameters: { value: { type, required: true, description: 'Schema-versioned value.' } },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { value: { type, required: true } },
+      },
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
+    },
+    execute: args => Promise.resolve({ value: args.value }),
+  })
+}
+
 export function apply(ctx) {
   let lateRegistered = false
   let removeLate
+  for (const name of ['constructor', 'toString', '__proto__']) {
+    ctx.tools.register(fixtureTool(name, args => Promise.resolve({ value: args.value })))
+  }
   ctx.tools.register(fixtureTool('fixture_eager', args => Promise.resolve({ value: args.value })))
+  ctx.tools.register(fixtureTool('fixture_legacy_describe', (args, exec) => {
+    exec.agent.session.append('tool/ptc-dispatch', {
+      rootCallId: exec.callId,
+      parentCallId: exec.callId,
+      subCallId: exec.callId + ':legacy',
+      name: 'describe_tools',
+      arguments: { names: ['fixture_schema'] },
+      isError: false,
+      content: [{
+        type: 'text',
+        text: JSON.stringify({ tools: [{ name: 'fixture_schema', schemaHash: args.value }] }),
+      }],
+    })
+    return Promise.resolve({ value: 'legacy-describe' })
+  }))
+  let replaceSchema = ctx.tools.register(schemaFixtureTool(1))
+  ctx.tools.register(fixtureTool('fixture_change_schema', () => {
+    replaceSchema()
+    replaceSchema = ctx.tools.register(schemaFixtureTool(2))
+    return Promise.resolve({ value: 'schema-v2' })
+  }))
   let replaceAlpha
   for (const name of ['fixture.page.alpha', 'fixture.page.beta', 'fixture.page.gamma']) {
     const dispose = ctx.tools.register(fixtureTool(name, args => Promise.resolve({ value: args.value })))

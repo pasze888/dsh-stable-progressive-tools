@@ -8,6 +8,8 @@ import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { DESCRIBE_TOOLS_NAME, INVOKE_TOOL_NAME, SEARCH_TOOLS_NAME, type ResolvedConfig } from './config.ts'
 import { SurfaceManager } from './surface.ts'
 import { canonicalJsonHash } from './hash.ts'
+import { registerDisclosureHistory } from './disclosure-history.ts'
+import { ToolSchemaChangedError } from './invocation.ts'
 
 const INFRASTRUCTURE_NAMES = new Set([RUN_CODE_NAME, SEARCH_TOOLS_NAME, DESCRIBE_TOOLS_NAME, INVOKE_TOOL_NAME])
 
@@ -67,7 +69,8 @@ function renderSdk(ctx: Context, schemas: readonly ToolSdkSchema[]): string {
   return renderToolsSdk(schemas, runtime.programFormat)
 }
 
-export function installStablePtc(ctx: Context, config: ResolvedConfig): void {
+export async function installStablePtc(ctx: Context, config: ResolvedConfig): Promise<void> {
+  const disclosureHistory = await registerDisclosureHistory(ctx)
   const searchTool = defineTool({
     name: SEARCH_TOOLS_NAME,
     description: 'Search the live tool catalog by exact names and description words without changing tool permissions.',
@@ -138,6 +141,10 @@ export function installStablePtc(ctx: Context, config: ResolvedConfig): void {
     output: {
       schema: { type: 'json' },
       render: renderJson,
+      presentationMeta: (_args, value) => {
+        const disclosure = value as { tools: { name: string; schemaHash: string }[] }
+        return { tools: disclosure.tools.map(tool => ({ name: tool.name, schemaHash: tool.schemaHash })) }
+      },
     },
     isConcurrencySafe: () => true,
     execute(args, exec) {
@@ -166,6 +173,21 @@ export function installStablePtc(ctx: Context, config: ResolvedConfig): void {
   ctx.tools.register(searchTool, { when: ({ agent }) => isStableSurfaceEnabled(agent) })
   ctx.tools.register(describeTool, { when: ({ agent }) => isStableSurfaceEnabled(agent) })
   const surfaces = new SurfaceManager(config)
+
+  ctx.tools.guard(exec => {
+    if (exec.parent === undefined || exec.agent === undefined) return
+    const disclosures = disclosureHistory.stateOf(exec.agent.session)
+    if (!Object.hasOwn(disclosures, exec.name)) return
+    const expected = disclosures[exec.name]
+    if (expected === undefined) return
+    const live = ctx.tools.get(exec.name, exec.agent, exec.toolSet)
+    if (live === undefined || schemaHash(sdkSchema(live)) === expected) return
+    const error = new ToolSchemaChangedError(exec.name)
+    return {
+      reason: 'TOOL_SCHEMA_CHANGED: ' + error.message,
+      info: { name: error.name, code: 'TOOL_SCHEMA_CHANGED' },
+    }
+  })
 
   ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
     const assembly = await next()

@@ -15,6 +15,7 @@ export default defineConfig({
       '@deepseek-ai/dsh-tool-executor-ptc',
       '@deepseek-ai/dsh-tools',
       '@deepseek-ai/dsh-util-values',
+      'zod',
     ],
   },
   clean: true,
