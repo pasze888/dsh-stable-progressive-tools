@@ -6,10 +6,10 @@ DSH 的 PTC Executor 会为每个模型步骤重新生成完整 SDK，直接追�
 
 ## 最终决策
 
-以下决策优先于后方原始草案中的冲突内容。
+以下决策优先于后方原始草案中的冲突内容（2026-11-27 路线收口更新：确定永久仅做 PTC、仅做插件自带 `stable-ptc-eval` preset，并冻结真实模型 A/B 判定规则）。
 
-1. **P0 是纯 Code 模式**：只包含固定 SDK、Search、Describe、实时 Binding、Shell 选择和宿主契约测试，不包含 Native、Both、Plan Mode 或 HistoryGuard。
-2. **按 preset scope 隔离**：插件只安装在 `stable-ptc-eval` 的插件树中，不做全局挂载；普通 `ptc` 不安装插件。
+1. **永久仅做 PTC 模式，取消 Native / Both 路线**：永久取消 Native、Both、`invoke_tool` 与 Provider 原生工具引用（不作为未来阶段保留）。通用 Plan Mode 稳定化与通用 HistoryGuard 一并取消，仅在能复现其破坏 PTC Stable Surface 时做最小、PTC 专属保护。
+2. **永久按插件 preset scope 隔离**：唯一生效范围是插件自带的 `stable-ptc-eval` preset；不做全局挂载，不扩展到普通 `ptc` 或其他 preset，默认按会话来源排除子 Agent（`includeSubagents: false`）。即使后续真实模型 A/B 通过，也不代表扩展到其他 preset。
 3. **采用 section 改写方案**：整体替换 `tools:sdk`，保留 `run_code` 原描述，不替换或包装 PTC Executor。
 4. **配置简化**：删除 `activation.enabledPresets`；保留 `includeSubagents: false`，通过会话来源排除子 Agent，而不是依赖 scope。
 5. **统一 PTC 调用方式**：Search、Describe 和普通工具均通过 `tools.*()` 或 `tools["原始名称"]()` 调用；使用 `return` 将结果交给模型。
@@ -20,16 +20,24 @@ DSH 的 PTC Executor 会为每个模型步骤重新生成完整 SDK，直接追�
 10. **完整持久化 Stable Surface**：保存恢复所需的规范化工具声明、SDK、固定提示、协议版本、eager 工具和 Shell；Hash 用于完整性校验而非恢复数据。重载、重启和恢复不得套用新配置，fork 继承父 Surface。
 11. **Surface 创建原子化**：普通 eager 工具不可用时，在修改宿主前报错；Shell 与 eager 名称去重；SurfaceHash 覆盖全部模型可见初始内容，Surface 深度不可变。
 12. **简单冲突治理**：目标 preset 只让本插件改写 `tools:sdk`，通过真实宿主测试检查；能发现异常时告警，不承诺检测所有外层 waterfall 修改。
-13. **Native 不在会话中换协议**：未来若实现 Native，运行中失败只报错并告警；只有新会话可以选择 `invoke_tool`。Describe 的完整 Schema 在首次结果中持久化，禁止事后补写旧结果。
-14. **观测不记录正文**：生产 Telemetry 不记录查询、参数或结果正文；Recall@5 使用带标注的离线查询集。
-15. **阶段验收分离**：P0 证明工程链路正确；真实模型 A/B 和放量门槛仍在 P3 判定。
+13. **观测不记录正文**：生产 Telemetry 不记录查询、参数或结果正文；Recall@5 使用覆盖生产目录的固定标注离线查询集，且将原始词法排序结果与 `zeroMatch: catalog` 兜底分开报告。
+14. **P0 工程验收与真实模型 A/B 分离**：P0 已完成工程契约验收，但只证明工程链路正确，不代表生产可用；下一阶段核心工作是与普通 `ptc` preset 的配对真实模型 A/B，仅用于判断 `stable-ptc-eval` preset 是否达到生产可用标准。
+15. **真实模型 A/B 硬门槛、统计规则与证据分级**：
+    - **硬门槛**：实际成本下降 ≥10%；任务通过率回退 ≤2 个百分点（生产放量线）；非 Compaction 前缀稳定率 100%；原始词法排序 Search Recall@5 ≥97%；权限或安全回退为一票否决项。
+    - **两道门推进**：首阶段在固定题量下以 **5pp 非劣效 + 成本下降 ≥10%** 过筛；过筛后再决定是否追加样本量验证 2pp 放量线（或调整最终非劣界）。
+    - **诊断指标（不设硬门槛）**：发现额外轮次、首次目标工具命中率、参数合法率、正确拒答率、p50/p95 延迟。
+    - **统计与分母**：配对分析，单侧 95% 置信区间（题级 bootstrap 10,000 次：通过率差 5% 分位 `> -margin`，费用比 95% 分位 `≤ 0.90`），预实验后冻结方法不得事后更换。成本主分母为“每个分配任务的总实际成本”（含失败、超时、重试）；失败/超时保留在通过率分母；usage/账单缺失单独标记不按 0 处理。主通过率只采纳客观 oracle。
+    - **成本证据三层分离**：Provider 真实 usage（代理逐请求 + 服务端用量汇总）、按价表估算成本（题级配对统计）、Provider 实际账单/明细导出（支撑“实际成本下降 ≥10%”结论）。
+    - **实验纪律**：两臂除本插件一行外完全对齐（同模型、同完整 preset 工具目录、同参数/权限/隔离）；每次重复新建会话、AB/BA 交错顺序；先一条常用真实模型线路预实验与首轮正式评测，再用第二条线路复核；每个真实计费阶段启动前须获明确确认。
 
 ## Considered Options
 
 - **全局插件监听**：拒绝。它会收到所有 preset 的装配，需要脆弱地反查 preset，并扩大意外影响范围。
-- **替换 PTC Executor**：P0 拒绝。它能修改 `run_code` 描述，但当前没有这项需求，包装 Executor 会增加维护面。
+- **替换 PTC Executor**：拒绝。它能修改 `run_code` 描述，但当前没有这项需求，包装 Executor 会增加维护面。
 - **在 SDK 后追加裁剪声明**：拒绝。原始完整声明仍然存在，必须整体替换 section。
 - **为 Describe 设置数量、字节预算或分页**：拒绝。当前优先保持调用简单和结果完整；Search 仍保留预算和分页。
+- **Native / Both / `invoke_tool` / Provider 原生工具引用**：已永久取消（2026-11-27）。投入产出比低且维护面分散，项目聚焦 PTC 单一呈现路径。
+- **通用 Plan Mode Guard / HistoryGuard**：已取消。仅在复现破坏 PTC Stable Surface 的具体问题时做最小、PTC 专属保护。
 
 ## Consequences
 
@@ -41,11 +49,13 @@ DSH 的 PTC Executor 会为每个模型步骤重新生成完整 SDK，直接追�
 
 ## 原始设计草案
 
-> 以下内容复制自项目最初引用的外部设计草案，作为背景保留。若与以上最终决策冲突，以最终决策为准。
+> 以下内容复制自项目最初引用的外部设计草案，作为历史方案背景保留。若与以上最终决策冲突，一律以最终决策为准。
+>
+> **历史方案说明（2026-11-27）**：下文中的 Native、Both、`invoke_tool`、Provider 原生工具引用、全局/跨 preset 扩量、通用 Plan Mode / HistoryGuard 以及 15% 成本门槛等条款均已**永久取消或被上方最终决策取代**，仅作历史溯源保留；P0 已验收的工程契约事实保持不变。
 >
 > 日期：2026-11-25
 >
-> 状态：原始草案附录
+> 状态：历史方案附录
 >
 > 参考：`Yan-Zero/dsh-progressive-tools` 的渐进式工具呈现，以及 `Aa728848/dsh-chatgpt-subscription` 的前缀缓存保护措施。
 

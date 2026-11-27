@@ -48,9 +48,11 @@ DeepSeek Harness 的会话稳定渐进式工具披露插件。
 
 这些结果只证明 P0 工程契约，不证明真实模型的成本、质量、延迟或任务通过率。
 
-## 边界
+## 边界与路线决策
 
-P0 不包含 Native、Both、`invoke_tool`、Plan Mode 稳定化或通用 HistoryGuard。真实模型 A/B 和放量门槛属于后续阶段。
+- **永久仅做 PTC、仅做插件自带 `stable-ptc-eval` preset**：Native、Both、`invoke_tool`、Provider 原生工具引用已永久取消；不全局挂载，也不扩展到普通 `ptc` 或其他 preset（默认按会话来源排除子 Agent）。
+- **不做通用 Plan Mode / HistoryGuard**：仅在能复现破坏 PTC Stable Surface 的场景下做最小、PTC 专属保护。
+- **A/B 用途限定**：真实模型 A/B 只用于评估 `stable-ptc-eval` preset 是否达到生产可用标准；通过也不代表扩展到其他 preset。
 
 ## 项目结构
 
@@ -110,8 +112,11 @@ npm run check
 
 `npm run check` 包含 TypeScript 类型检查、ESM 构建和完整 Vitest 测试。SDK 测试需要构建后的 `lib/index.mjs`，并启动多个真实 DSH 子进程，因此运行时间明显长于纯逻辑测试。
 
-## 后续
+## 下一阶段（真实模型 A/B）
 
-1. 在后续阶段实现 Native、稳定 `invoke_tool` 或其他呈现协议；
-2. 通过真实模型 A/B 评估成本、质量、延迟、Recall 和任务通过率；
-3. 达到设计门槛前，不扩展到其他 preset，不把 P0 工程验收当作生产放量证明。
+1. **评测底座与指标管线**：复用外部 `dsh-bench`（`DSH_BENCH_DIR` 引用，不拷贝题库入库）加真实 preset driver 与代理/机制扩展，并在本仓库 `eval/` 建设生产目录 Recall@5 标注集与 DSH 专属微基准；
+2. **硬门槛与两道门策略**：
+   - 硬门槛：实际成本下降 ≥10%（需 Provider 账单/明细导出支撑）、任务通过率回退 ≤2pp（生产放量线）、非 Compaction 前缀稳定率 100%、原始词法排序 Search Recall@5 ≥97%、权限/安全零回退；
+   - 两道门推进：先做预实验验证采集与对账链路，首阶段以 5pp 非劣效 + 成本下降 ≥10% 过筛，过筛后再决定是否追加样本冲 2pp 放量线，并用第二条真实模型线路复核；
+3. **诊断指标**：发现额外轮次、首次目标工具命中率、参数合法率、正确拒答率、p50/p95 延迟作诊断观测，不新增数值门槛；
+4. 达到生产可用门槛前，不把 P0 工程验收当作生产放量证明。
